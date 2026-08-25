@@ -4,6 +4,7 @@ import os
 import argparse
 import time
 import json
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -310,6 +311,28 @@ def save_status(status):
         json.dump(status, f, indent=2)
 
 
+def format_duration(seconds):
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    mins, secs = divmod(seconds, 60)
+    if mins < 60:
+        return f"{mins}m {secs:02d}s"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}h {mins:02d}m"
+
+
+def parse_epoch_progress(line, total_epochs):
+    m = re.search(r"(\d+)/(\d+)\s+\d+(?:\.\d+)?[GMK]", line)
+    if not m:
+        return None
+    cur = int(m.group(1))
+    tot = int(m.group(2))
+    if tot == total_epochs:
+        return cur
+    return None
+
+
 def build_cmd(exp_name, exp_info, args):
     config_path = CONFIG_DIR / exp_info["config"]
     if not config_path.exists():
@@ -372,6 +395,8 @@ def run_experiments(experiment_ids, args):
     passed = 0
     failed = 0
     skipped = 0
+    exp_durations = []
+    batch_start = time.time()
 
     print("=" * 70)
     print(f"  Batch Training: {total} experiment(s)")
@@ -382,6 +407,7 @@ def run_experiments(experiment_ids, args):
     print(f"  Save period: {args.save_period}")
     print(f"  Batch:  {args.batch_size}")
     print(f"  AMP:    {args.amp}")
+    print(f"  Console: {'verbose' if args.verbose else 'concise (ETA only)'}")
     if args.skip_completed:
         print(f"  Mode:   skip completed experiments")
     print("=" * 70)
@@ -440,25 +466,46 @@ def run_experiments(experiment_ids, args):
                     bufsize=1,
                 )
 
+                last_epoch = 0
                 for line in process.stdout:
-                    sys.stdout.write(line)
                     lf.write(line)
                     lf.flush()
+
+                    if args.verbose:
+                        sys.stdout.write(line)
+                        sys.stdout.flush()
+                    else:
+                        cur_epoch = parse_epoch_progress(line, args.epochs)
+                        if cur_epoch is not None and cur_epoch != last_epoch:
+                            last_epoch = cur_epoch
+                            elapsed = time.time() - start_time
+                            remaining = elapsed * (args.epochs - cur_epoch) / max(cur_epoch, 1)
+                            sys.stdout.write(
+                                f"\r  [{exp_id}] epoch {cur_epoch}/{args.epochs} | "
+                                f"elapsed {format_duration(elapsed)} | "
+                                f"ETA {format_duration(remaining)}"
+                            )
+                            sys.stdout.flush()
 
                 process.wait()
 
                 elapsed = time.time() - start_time
-                elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
+                elapsed_str = format_duration(elapsed)
+                exp_durations.append(elapsed)
+
+                if not args.verbose:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
 
                 if process.returncode == 0:
                     status[run_id] = "completed"
                     passed += 1
-                    print(f"\n  [OK] {exp_id} completed successfully ({elapsed_str})")
+                    print(f"  [OK] {exp_id} completed in {elapsed_str}")
                     lf.write(f"\n[OK] Completed in {elapsed_str}\n")
                 else:
                     status[run_id] = "failed"
                     failed += 1
-                    print(f"\n  [FAIL] {exp_id} failed with code {process.returncode} ({elapsed_str})")
+                    print(f"  [FAIL] {exp_id} failed with code {process.returncode} ({elapsed_str})")
                     lf.write(f"\n[FAIL] Exit code: {process.returncode} ({elapsed_str})\n")
                     if not args.continue_on_error:
                         save_status(status)
@@ -472,6 +519,15 @@ def run_experiments(experiment_ids, args):
             sys.exit(1)
 
         save_status(status)
+
+        # Batch-level progress / ETA estimate
+        remaining_exps = total - idx
+        if exp_durations and remaining_exps > 0:
+            avg = sum(exp_durations) / len(exp_durations)
+            batch_elapsed = time.time() - batch_start
+            batch_eta = avg * remaining_exps
+            print(f"  [BATCH] {idx}/{total} done | elapsed {format_duration(batch_elapsed)} "
+                  f"| ~{format_duration(batch_eta)} remaining")
 
     print("\n" + "=" * 70)
     print(f"  SUMMARY: {passed} passed, {failed} failed, {skipped} skipped out of {total}")
@@ -593,6 +649,8 @@ Usage examples:
                             help="Continue to next experiment even if current one fails")
     ctrl_group.add_argument("--dry-run", action="store_true",
                             help="Print commands without executing")
+    ctrl_group.add_argument("--verbose", action="store_true",
+                            help="Stream full training output to console (default: concise with ETA)")
 
     return parser.parse_args()
 
