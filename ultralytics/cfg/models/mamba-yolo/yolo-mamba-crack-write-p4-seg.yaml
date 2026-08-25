@@ -1,0 +1,27 @@
+# YOLOv8 counterpart of M1: P4 probability-guided B/input write; Delta remains baseline.
+nc: 1
+scales: {n: [0.33, 0.25, 1024], s: [0.33, 0.50, 1024], m: [0.67, 0.75, 768], l: [1.00, 1.00, 512], x: [1.00, 1.25, 512]}
+backbone:
+  - [-1, 1, SimpleStem, [128, 3]]
+  - [-1, 3, VSSBlock, [128, 0.0]]
+  - [-1, 1, VisionClueMerge, [256]]
+  - [-1, 3, VSSBlock, [256, 0.0]]
+  - [-1, 1, VisionClueMerge, [512]]
+  - [-1, 9, CrackWriteVSSBlock, [512, 0.0]]  # P4 write gate only
+  - [-1, 1, VisionClueMerge, [1024]]
+  - [-1, 3, VSSBlock, [1024, 0.0]]
+  - [-1, 1, SPPF, [1024, 5]]
+head:
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 5], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [512, 0.0]]
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 3], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [256, 0.0]]
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 11], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [512, 0.0]]
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 8], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [1024, 0.0]]
+  - [[14, 17, 20], 1, Segment, [nc, 32, 256]]

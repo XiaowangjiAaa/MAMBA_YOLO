@@ -1,4 +1,16 @@
-# [AAAI2025] Mamba YOLO: A Simple Baseline for Object Detection with State Space Model
+# MAMBA_YOLO
+
+Crack instance-segmentation research fork based on **Mamba-YOLO** and a YOLO11 segmentation head. The current research line combines directional detail-preserving stage transitions with crack-aware state writing and adaptive horizontal/vertical scan fusion.
+
+- Experiment history and design notes: [docs/experiments](docs/experiments/README.md)
+- Reproducible training commands: [docs/commands](docs/commands/README.md)
+- Current corrected Q00 experiments: [8.24 design](docs/experiments/8.24_Q00_CORRECTED_HV_AND_STABILITY_EXPERIMENTS.md)
+
+Training outputs and checkpoints under `output_dir/` are intentionally excluded from version control.
+
+## Upstream project
+
+This project is derived from **[AAAI 2025] Mamba YOLO: A Simple Baseline for Object Detection with State Space Model**.
 
 ![Python 3.11](https://img.shields.io/badge/python-3.11-g) ![pytorch 2.3.0](https://img.shields.io/badge/pytorch-2.3.0-blue.svg) [![docs](https://img.shields.io/badge/docs-latest-blue)](README.md)
 

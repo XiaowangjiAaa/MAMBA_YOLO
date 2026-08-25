@@ -1,0 +1,37 @@
+# 8.23 Q03: role-specific candidate. P3 writes crack evidence; P4-last performs direction-aware scan.
+nc: 1
+scale: n
+guidance_loss_weight: 0.0
+guidance_dice_weight: 0.5
+orientation_loss_weight: 0.0
+gate_regularization_weight: 0.0
+scales: {n: [0.33, 0.25, 1024], s: [0.33, 0.50, 1024], m: [0.67, 0.75, 768], l: [1.00, 1.00, 512], x: [1.00, 1.25, 512]}
+
+backbone:
+  - [-1, 1, SimpleStem, [128, 3]]
+  - [-1, 3, VSSBlock, [128]]
+  - [-1, 1, CrackMergeDirectional, [256]]  # P3 directional detail
+  # Args: channels, drop, write_init, scan_init, write_max, scan_max, temperature,
+  #       nonnegative, enable_write, enable_scan.
+  - [-1, 3, UnifiedCrackAwareVSSBlock, [256, 0.0, 0.05, 0.01, 0.25, 0.25, 2.0, True, True, False]]
+  - [-1, 1, CrackMergeDirectional, [512]]  # P4 directional detail
+  - [-1, 9, LastUnifiedCrackAwareVSSStage, [512, 0.01, 0.05, 0.25, 0.25, 2.0, True, False, True]]
+  - [-1, 1, CrackMergeDirectional, [1024]] # restore the empirically useful P5 directional merge
+  - [-1, 3, VSSBlock, [1024]]
+  - [-1, 1, SPPF, [1024, 5]]
+  - [-1, 2, C2PSA, [1024]]
+
+head:
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 5], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [512]]
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 3], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [256]]
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [512]]
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 9], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [1024]]
+  - [[15, 18, 21], 1, v11Segment, [nc, 32, 256]]

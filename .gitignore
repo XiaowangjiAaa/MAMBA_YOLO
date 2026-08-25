@@ -3,9 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 .idea
-output_dir
+output_dir/
 ultralytics.egg-info
-docs
 examples
 # C extensions
 *.so

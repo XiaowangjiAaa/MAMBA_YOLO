@@ -1,0 +1,44 @@
+# Mamba-YOLO crack segmentation based on the YOLO11 architecture.
+# State update: crack-guided pre-softplus delta modulation.
+# Scan: original Cross Scan. Head: YOLO11-style v11Segment.
+
+nc: 1  # crack class
+scales:  # [depth, width, max_channels]
+  n: [0.33, 0.25, 1024]
+  s: [0.33, 0.50, 1024]
+  m: [0.67, 0.75, 768]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.25, 512]
+
+# Mamba-YOLO backbone with YOLO11 C2PSA after SPPF.
+backbone:
+  - [-1, 1, SimpleStem, [128, 3]]          # 0-P2/4
+  - [-1, 3, CrackVSSBlock, [128]]          # 1
+  - [-1, 1, VisionClueMerge, [256]]        # 2-P3/8
+  - [-1, 3, CrackVSSBlock, [256]]          # 3
+  - [-1, 1, VisionClueMerge, [512]]        # 4-P4/16
+  - [-1, 9, CrackVSSBlock, [512]]          # 5
+  - [-1, 1, VisionClueMerge, [1024]]       # 6-P5/32
+  - [-1, 3, CrackVSSBlock, [1024]]         # 7
+  - [-1, 1, SPPF, [1024, 5]]              # 8
+  - [-1, 2, C2PSA, [1024]]                 # 9
+
+# Mamba-YOLO neck with YOLO11 segmentation head.
+head:
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 5], 1, Concat, [1]]
+  - [-1, 3, CrackVSSBlock, [512]]          # 12
+
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 3], 1, Concat, [1]]
+  - [-1, 3, CrackVSSBlock, [256]]          # 15-P3/8
+
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]]
+  - [-1, 3, CrackVSSBlock, [512]]          # 18-P4/16
+
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 9], 1, Concat, [1]]
+  - [-1, 3, CrackVSSBlock, [1024]]         # 21-P5/32
+
+  - [[15, 18, 21], 1, v11Segment, [nc, 32, 256]]

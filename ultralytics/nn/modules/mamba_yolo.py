@@ -1,6 +1,30 @@
 from .common_utils_mbyolo import *
+import torch.nn.functional as F
 
-__all__ = ("VSSBlock", "SimpleStem", "VisionClueMerge", "XSSBlock")
+__all__ = (
+    "VSSBlock",
+    "CrackVSSBlock",
+    "CrackVSSBlockV2",
+    "OrientationVSSBlock",
+    "DiagonalOrientationVSSBlock",
+    "CrackWriteVSSBlock",
+    "CenteredCrackWriteVSSBlock",
+    "LastCrackWriteVSSStage",
+    "LastCenteredCrackWriteVSSStage",
+    "CrackMemoryVSSBlock",
+    "CrackStructureVSSBlock",
+    "UnifiedCrackAwareVSSBlock",
+    "LastUnifiedCrackAwareVSSStage",
+    "CrackDetailStemLite",
+    "CrackDetailStemDirectional",
+    "CrackMergeLite",
+    "CrackMergeDirectional",
+    "SimpleStem",
+    "VisionClueMerge",
+    "XSSBlock",
+    "CrackXSSBlock",
+    "CrackXSSBlockV2",
+)
 
 
 class SS2D(nn.Module):
@@ -19,6 +43,24 @@ class SS2D(nn.Module):
             # ======================
             dropout=0.0,
             bias=False,
+            crack_guided_delta=False,
+            crack_delta_centered=False,
+            guidance_alpha_max=0.5,
+            guidance_alpha_init=0.05,
+            crack_guided_write=False,
+            write_guidance_centered=False,
+            write_beta_max=0.5,
+            write_beta_init=0.0,
+            orientation_scan=False,
+            diagonal_scan=False,
+            orientation_temperature=2.0,
+            orientation_gate_max=1.0,
+            orientation_gate_init=None,
+            unified_crack_guidance=False,
+            nonnegative_gates=False,
+            unified_enable_write=True,
+            unified_enable_scan=True,
+            orientation_family_logits=False,
             # ======================
             forward_type="v2",
             **kwargs,
@@ -33,7 +75,28 @@ class SS2D(nn.Module):
         self.dt_rank = math.ceil(d_model / 16) if dt_rank == "auto" else dt_rank
         self.d_state = math.ceil(d_model / 6) if d_state == "auto" else d_state  # 20240109
         self.d_conv = d_conv
-        self.K = 4
+        if unified_crack_guidance:
+            crack_guided_write = bool(unified_enable_write)
+            write_guidance_centered = bool(unified_enable_write)
+            orientation_scan = bool(unified_enable_scan)
+        self.scan_mode = "oriented_hvd" if diagonal_scan else ("oriented_hv" if orientation_scan else "cross")
+        self.K = 8 if self.scan_mode == "oriented_hvd" else 4
+        self.crack_guided_delta = crack_guided_delta
+        self.crack_delta_centered = crack_delta_centered
+        self.crack_guided_write = crack_guided_write
+        self.write_guidance_centered = write_guidance_centered
+        self.orientation_scan = orientation_scan or diagonal_scan
+        self.orientation_temperature = orientation_temperature
+        self.unified_crack_guidance = unified_crack_guidance
+        self.nonnegative_gates = bool(nonnegative_gates)
+        self.unified_enable_write = bool(unified_enable_write)
+        self.unified_enable_scan = bool(unified_enable_scan)
+        # Backward-compatible switch. Legacy oriented_hv accidentally projected the
+        # two-channel head onto [+x, -x], leaving the second channel unused. New
+        # experiments interpret the two channels directly as H/V family logits.
+        self.orientation_family_logits = bool(orientation_family_logits)
+        if self.orientation_family_logits and self.scan_mode != "oriented_hv":
+            raise ValueError("orientation_family_logits currently requires oriented_hv scan mode")
 
         # tags for forward_type ==============================
         def checkpostfix(tag, value):
@@ -78,14 +141,86 @@ class SS2D(nn.Module):
             self.in_rank = nn.Conv2d(d_expand, d_inner, kernel_size=1, bias=False, **factory_kwargs)
             self.out_rank = nn.Linear(d_inner, d_expand, bias=False, **factory_kwargs)
 
+        # The unified variant predicts probability and undirected orientation
+        # from one structure head. Legacy ablations keep their separate heads.
+        if self.unified_crack_guidance:
+            # The head is zero-initialized, so preserve the RNG stream as well: with the
+            # same seed, all following baseline SS2D parameters retain paired initialization.
+            rng_state = torch.get_rng_state()
+            self.structure_head = nn.Conv2d(d_inner, 3, kernel_size=1, bias=True, **factory_kwargs)
+            nn.init.zeros_(self.structure_head.weight)
+            nn.init.zeros_(self.structure_head.bias)
+            torch.set_rng_state(rng_state)
+        elif self.crack_guided_delta or self.crack_guided_write:
+            self.guidance = nn.Sequential(
+                nn.Conv2d(d_inner, 1, kernel_size=1, bias=True, **factory_kwargs),
+                nn.Sigmoid(),
+            )
+            nn.init.zeros_(self.guidance[0].weight)
+            nn.init.zeros_(self.guidance[0].bias)
+
+        if self.crack_guided_delta:
+            if self.crack_delta_centered:
+                if not 0.0 < guidance_alpha_init < guidance_alpha_max:
+                    raise ValueError("guidance_alpha_init must be between 0 and guidance_alpha_max")
+                alpha_ratio = guidance_alpha_init / guidance_alpha_max
+                alpha_logit = math.log(alpha_ratio / (1.0 - alpha_ratio))
+                self.guidance_alpha = nn.Parameter(torch.tensor(alpha_logit, **factory_kwargs))
+                self.guidance_alpha_max = guidance_alpha_max
+            else:
+                self.guidance_alpha = nn.Parameter(torch.zeros((), **factory_kwargs))
+        if self.crack_guided_write:
+            if self.nonnegative_gates:
+                if not 0.0 < write_beta_init < write_beta_max:
+                    raise ValueError("nonnegative write_beta_init must be between 0 and write_beta_max")
+                beta_ratio = write_beta_init / write_beta_max
+                beta_raw = math.log(beta_ratio / (1.0 - beta_ratio))
+            else:
+                if not -write_beta_max < write_beta_init < write_beta_max:
+                    raise ValueError("abs(write_beta_init) must be smaller than write_beta_max")
+                beta_ratio = write_beta_init / write_beta_max
+                beta_raw = math.atanh(beta_ratio)
+            self.write_beta = nn.Parameter(torch.tensor(beta_raw, **factory_kwargs))
+            self.write_beta_max = write_beta_max
+
+        if self.orientation_scan:
+            if not self.unified_crack_guidance:
+                self.orientation_head = nn.Conv2d(d_inner, 2, kernel_size=1, bias=True, **factory_kwargs)
+                nn.init.zeros_(self.orientation_head.weight)
+                nn.init.zeros_(self.orientation_head.bias)
+            basis = torch.tensor(
+                [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]], **factory_kwargs
+            )
+            self.register_buffer("orientation_basis", basis, persistent=False)
+            if orientation_gate_init is not None:
+                if self.nonnegative_gates:
+                    if not 0.0 < orientation_gate_init < orientation_gate_max:
+                        raise ValueError(
+                            "nonnegative orientation_gate_init must be between 0 and orientation_gate_max"
+                        )
+                    gate_ratio = orientation_gate_init / orientation_gate_max
+                    gate_raw = math.log(gate_ratio / (1.0 - gate_ratio))
+                else:
+                    if not -orientation_gate_max < orientation_gate_init < orientation_gate_max:
+                        raise ValueError("abs(orientation_gate_init) must be smaller than orientation_gate_max")
+                    gate_ratio = orientation_gate_init / orientation_gate_max
+                    gate_raw = math.atanh(gate_ratio)
+                self.orientation_gate = nn.Parameter(torch.tensor(gate_raw, **factory_kwargs))
+                self.orientation_gate_max = orientation_gate_max
+
         # x proj ============================
         self.x_proj = [
             nn.Linear(d_inner, (self.dt_rank + self.d_state * 2), bias=False,
                       **factory_kwargs)
             for _ in range(self.K)
         ]
-        self.x_proj_weight = nn.Parameter(torch.stack([t.weight for t in self.x_proj], dim=0))  # (K, N, inner)
+        self.x_proj_weight = nn.Parameter(torch.stack([t.weight for t in self.x_proj], dim=0).clone())  # (K, N, inner)
         del self.x_proj
+
+        self.last_guidance = None
+        self.last_orientation = None
+        self.visual_guidance = None
+        self.visual_orientation = None
 
         # out proj =======================================
         self.out_proj = nn.Conv2d(d_expand, d_model, kernel_size=1, stride=1, bias=bias, **factory_kwargs)
@@ -97,6 +232,14 @@ class SS2D(nn.Module):
             torch.zeros((self.K * d_inner, self.d_state)))  # A == -A_logs.exp() < 0; # 0 < exp(A * dt) < 1
         self.dt_projs_weight = nn.Parameter(torch.randn((self.K, d_inner, self.dt_rank)))
         self.dt_projs_bias = nn.Parameter(torch.randn((self.K, d_inner)))
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('last_guidance', None)
+        state.pop('last_orientation', None)
+        state.pop('visual_guidance', None)
+        state.pop('visual_orientation', None)
+        return state
 
     @staticmethod
     def dt_init(dt_rank, d_inner, dt_scale=1.0, dt_init="random", dt_min=0.001, dt_max=0.1, dt_init_floor=1e-4,
@@ -155,6 +298,34 @@ class SS2D(nn.Module):
         D._no_weight_decay = True
         return D
 
+    def effective_write_gate(self):
+        """Return the bounded write strength used by the state update."""
+        if not self.crack_guided_write:
+            return None
+        transform = self.write_beta.sigmoid() if self.nonnegative_gates else self.write_beta.tanh()
+        return self.write_beta_max * transform
+
+    def effective_orientation_gate(self):
+        """Return the bounded scan mixing strength used by direction-aware propagation."""
+        if not hasattr(self, "orientation_gate"):
+            return None
+        transform = self.orientation_gate.sigmoid() if self.nonnegative_gates else self.orientation_gate.tanh()
+        return self.orientation_gate_max * transform
+
+    def orientation_scores(self, orientation: torch.Tensor) -> torch.Tensor:
+        """Map the structure-head output to scan-family scores.
+
+        The corrected H/V path uses both channels directly. The legacy projection
+        remains available so existing YAMLs and checkpoints keep their old behavior.
+        """
+        if self.orientation_family_logits:
+            if orientation.shape[1] != 2:
+                raise ValueError(f"H/V family logits require 2 channels, got {orientation.shape[1]}")
+            return orientation
+        family_count = 4 if self.scan_mode == "oriented_hvd" else 2
+        basis = self.orientation_basis[:family_count].to(dtype=orientation.dtype)
+        return torch.einsum("bchw,fc->bfhw", orientation, basis)
+
     def forward_corev2(self, x: torch.Tensor, channel_first=False, SelectiveScan=SelectiveScanCore,
                        cross_selective_scan=cross_selective_scan, force_fp32=None):
         force_fp32 = (self.training and (not self.disable_force32)) if force_fp32 is None else force_fp32
@@ -162,6 +333,47 @@ class SS2D(nn.Module):
             x = x.permute(0, 3, 1, 2).contiguous()
         if self.ssm_low_rank:
             x = self.in_rank(x)
+        has_probability = self.crack_guided_delta or self.crack_guided_write
+        if self.unified_crack_guidance:
+            structure = self.structure_head(x)
+            delta_guidance = structure[:, :1].sigmoid()
+            orientation = structure[:, 1:].tanh()
+            # Retain all shared-head channels in the autograd graph for write-only/scan-only
+            # DDP ablations, while contributing exactly zero to the enabled path.
+            if self.unified_enable_write and not self.unified_enable_scan:
+                delta_guidance = delta_guidance + 0.0 * orientation.mean(dim=1, keepdim=True)
+            elif self.unified_enable_scan and not self.unified_enable_write:
+                orientation = orientation + 0.0 * delta_guidance
+        else:
+            delta_guidance = self.guidance(x) if has_probability else None
+            orientation = torch.tanh(self.orientation_head(x)) if self.orientation_scan else None
+
+        # Loss consumes the live tensors. Detached copies are visualization-only.
+        self.last_guidance = delta_guidance
+        self.visual_guidance = delta_guidance.detach() if delta_guidance is not None else None
+        if self.crack_guided_delta and self.crack_delta_centered:
+            delta_alpha = self.guidance_alpha_max * self.guidance_alpha.sigmoid()
+        else:
+            delta_alpha = self.guidance_alpha if self.crack_guided_delta else None
+        write_beta = self.effective_write_gate()
+
+        if self.orientation_scan:
+            self.last_orientation = orientation
+            self.visual_orientation = orientation.detach()
+            direction_scores = self.orientation_scores(orientation)
+            family_count = direction_scores.shape[1]
+            adaptive_weights = family_count * torch.softmax(
+                self.orientation_temperature * direction_scores, dim=1
+            )
+            if hasattr(self, "orientation_gate"):
+                scan_gate = self.effective_orientation_gate()
+                direction_weights = 1.0 + scan_gate * (adaptive_weights - 1.0)
+            else:
+                direction_weights = adaptive_weights
+        else:
+            self.last_orientation = None
+            self.visual_orientation = None
+            direction_weights = None
         x = cross_selective_scan(
             x, self.x_proj_weight, None, self.dt_projs_weight, self.dt_projs_bias,
             self.A_logs, self.Ds,
@@ -169,6 +381,15 @@ class SS2D(nn.Module):
             out_norm_shape=getattr(self, "out_norm_shape", "v0"),
             delta_softplus=True, force_fp32=force_fp32,
             SelectiveScan=SelectiveScan, ssoflex=self.training,  # output fp32
+            delta_guidance=delta_guidance if self.crack_guided_delta else None,
+            delta_alpha=delta_alpha,
+            delta_guidance_center=0.5 if self.crack_delta_centered else 1.0,
+            write_guidance=(2.0 * delta_guidance - 1.0) if (
+                self.crack_guided_write and self.write_guidance_centered
+            ) else (delta_guidance if self.crack_guided_write else None),
+            write_beta=write_beta,
+            scan_mode=self.scan_mode,
+            direction_weights=direction_weights,
         )
         if self.ssm_low_rank:
             x = self.out_rank(x)
@@ -261,6 +482,22 @@ class XSSBlock(nn.Module):
             # =============================
             use_checkpoint: bool = False,
             post_norm: bool = False,
+            crack_guided_delta: bool = False,
+            crack_delta_centered: bool = False,
+            crack_guided_write: bool = False,
+            write_guidance_centered: bool = False,
+            write_beta_init: float = 0.0,
+            write_beta_max: float = 0.5,
+            orientation_scan: bool = False,
+            diagonal_scan: bool = False,
+            orientation_gate_init=None,
+            orientation_gate_max: float = 1.0,
+            orientation_temperature: float = 2.0,
+            unified_crack_guidance: bool = False,
+            nonnegative_gates: bool = False,
+            unified_enable_write: bool = True,
+            unified_enable_scan: bool = True,
+            orientation_family_logits: bool = False,
             **kwargs,
     ):
         super().__init__()
@@ -281,7 +518,23 @@ class XSSBlock(nn.Module):
                                          act_layer=ssm_act_layer,
                                          d_conv=ssm_conv,
                                          conv_bias=ssm_conv_bias,
-                                         dropout=ssm_drop_rate, ) for _ in range(n)))
+                                         dropout=ssm_drop_rate,
+                                         crack_guided_delta=crack_guided_delta,
+                                         crack_delta_centered=crack_delta_centered,
+                                         crack_guided_write=crack_guided_write,
+                                         write_guidance_centered=write_guidance_centered,
+                                         write_beta_init=write_beta_init,
+                                         write_beta_max=write_beta_max,
+                                         orientation_scan=orientation_scan,
+                                         diagonal_scan=diagonal_scan,
+                                         orientation_gate_init=orientation_gate_init,
+                                         orientation_gate_max=orientation_gate_max,
+                                         orientation_temperature=orientation_temperature,
+                                         unified_crack_guidance=unified_crack_guidance,
+                                          nonnegative_gates=nonnegative_gates,
+                                          unified_enable_write=unified_enable_write,
+                                          unified_enable_scan=unified_enable_scan,
+                                          orientation_family_logits=orientation_family_logits, ) for _ in range(n)))
         self.drop_path = DropPath(drop_path)
         self.lsblock = LSBlock(hidden_dim, hidden_dim)
         self.mlp_branch = mlp_ratio > 0
@@ -327,6 +580,22 @@ class VSSBlock(nn.Module):
             # =============================
             use_checkpoint: bool = False,
             post_norm: bool = False,
+            crack_guided_delta: bool = False,
+            crack_delta_centered: bool = False,
+            crack_guided_write: bool = False,
+            write_guidance_centered: bool = False,
+            write_beta_init: float = 0.0,
+            write_beta_max: float = 0.5,
+            orientation_scan: bool = False,
+            diagonal_scan: bool = False,
+            orientation_gate_init=None,
+            orientation_gate_max: float = 1.0,
+            orientation_temperature: float = 2.0,
+            unified_crack_guidance: bool = False,
+            nonnegative_gates: bool = False,
+            unified_enable_write: bool = True,
+            unified_enable_scan: bool = True,
+            orientation_family_logits: bool = False,
             **kwargs,
     ):
         super().__init__()
@@ -356,6 +625,22 @@ class VSSBlock(nn.Module):
                 conv_bias=ssm_conv_bias,
                 # ==========================
                 dropout=ssm_drop_rate,
+                crack_guided_delta=crack_guided_delta,
+                crack_delta_centered=crack_delta_centered,
+                crack_guided_write=crack_guided_write,
+                write_guidance_centered=write_guidance_centered,
+                write_beta_init=write_beta_init,
+                write_beta_max=write_beta_max,
+                orientation_scan=orientation_scan,
+                diagonal_scan=diagonal_scan,
+                orientation_gate_init=orientation_gate_init,
+                orientation_gate_max=orientation_gate_max,
+                orientation_temperature=orientation_temperature,
+                unified_crack_guidance=unified_crack_guidance,
+                nonnegative_gates=nonnegative_gates,
+                unified_enable_write=unified_enable_write,
+                unified_enable_scan=unified_enable_scan,
+                orientation_family_logits=orientation_family_logits,
                 # bias=False,
                 # ==========================
                 # dt_min=0.001,
@@ -385,6 +670,205 @@ class VSSBlock(nn.Module):
         return x
 
 
+class CrackVSSBlock(VSSBlock):
+    """VSSBlock with crack-guided pre-softplus delta modulation enabled."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, drop_path=0, **kwargs):
+        super().__init__(
+            in_channels=in_channels,
+            hidden_dim=hidden_dim,
+            drop_path=drop_path,
+            crack_guided_delta=True,
+            **kwargs,
+        )
+
+
+class CrackXSSBlock(XSSBlock):
+    """XSSBlock with crack-guided pre-softplus delta modulation enabled."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, n=1, **kwargs):
+        super().__init__(
+            in_channels=in_channels,
+            hidden_dim=hidden_dim,
+            n=n,
+            crack_guided_delta=True,
+            **kwargs,
+        )
+
+
+class CrackVSSBlockV2(VSSBlock):
+    """VSSBlock with bounded, centered crack-guided delta modulation."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, drop_path=0, **kwargs):
+        super().__init__(
+            in_channels=in_channels,
+            hidden_dim=hidden_dim,
+            drop_path=drop_path,
+            crack_guided_delta=True,
+            crack_delta_centered=True,
+            **kwargs,
+        )
+
+
+class CrackXSSBlockV2(XSSBlock):
+    """XSSBlock with bounded, centered crack-guided delta modulation."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, n=1, **kwargs):
+        super().__init__(
+            in_channels=in_channels,
+            hidden_dim=hidden_dim,
+            n=n,
+            crack_guided_delta=True,
+            crack_delta_centered=True,
+            **kwargs,
+        )
+
+
+class OrientationVSSBlock(VSSBlock):
+    """VSSBlock with content-adaptive horizontal/vertical scan fusion."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, drop_path=0, **kwargs):
+        super().__init__(in_channels, hidden_dim, drop_path, orientation_scan=True, **kwargs)
+
+
+class DiagonalOrientationVSSBlock(VSSBlock):
+    """VSSBlock with horizontal, vertical, and two diagonal scan families."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, drop_path=0, **kwargs):
+        super().__init__(in_channels, hidden_dim, drop_path, orientation_scan=True, diagonal_scan=True, **kwargs)
+
+
+class CrackWriteVSSBlock(VSSBlock):
+    """VSSBlock that preserves delta and strengthens crack-probable input writes through B."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, drop_path=0, **kwargs):
+        super().__init__(in_channels, hidden_dim, drop_path, crack_guided_write=True, **kwargs)
+
+
+class CenteredCrackWriteVSSBlock(VSSBlock):
+    """VSSBlock using B * (1 + beta * (2g - 1)) to remove constant-gate scaling."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, drop_path=0, **kwargs):
+        super().__init__(
+            in_channels,
+            hidden_dim,
+            drop_path,
+            crack_guided_write=True,
+            write_guidance_centered=True,
+            write_beta_init=0.05,
+            **kwargs,
+        )
+
+
+class _LastCrackWriteVSSStage(nn.Sequential):
+    """Reproduce a repeated VSS stage while modifying only its final block."""
+
+    final_block = CrackWriteVSSBlock
+
+    def __init__(self, in_channels=0, hidden_dim=0, n=1, drop_path=0, **kwargs):
+        blocks = []
+        for index in range(n):
+            block_type = self.final_block if index == n - 1 else VSSBlock
+            blocks.append(
+                block_type(
+                    in_channels if index == 0 else hidden_dim,
+                    hidden_dim,
+                    drop_path,
+                    **kwargs,
+                )
+            )
+        super().__init__(*blocks)
+
+
+class LastCrackWriteVSSStage(_LastCrackWriteVSSStage):
+    """Repeated VSS stage with the original probability write gate only in the last block."""
+
+
+class LastCenteredCrackWriteVSSStage(_LastCrackWriteVSSStage):
+    """Repeated VSS stage with a centered write gate only in the last block."""
+
+    final_block = CenteredCrackWriteVSSBlock
+
+
+class CrackMemoryVSSBlock(VSSBlock):
+    """VSSBlock combining bounded centered delta retention with probability-guided input writes."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, drop_path=0, **kwargs):
+        super().__init__(
+            in_channels,
+            hidden_dim,
+            drop_path,
+            crack_guided_delta=True,
+            crack_delta_centered=True,
+            crack_guided_write=True,
+            **kwargs,
+        )
+
+
+class CrackStructureVSSBlock(VSSBlock):
+    """Joint H/V orientation-aware scan and probability-guided memory block."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, drop_path=0, **kwargs):
+        super().__init__(
+            in_channels,
+            hidden_dim,
+            drop_path,
+            crack_guided_write=True,
+            orientation_scan=True,
+            **kwargs,
+        )
+
+
+class UnifiedCrackAwareVSSBlock(VSSBlock):
+    """One crack-aware block with a shared probability/orientation head and learnable effect gates."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, drop_path=0, write_gate_init=0.05,
+                 scan_gate_init=0.05, write_gate_max=0.5, scan_gate_max=1.0,
+                 orientation_temperature=2.0, nonnegative_gates=False,
+                 enable_write=True, enable_scan=True, orientation_family_logits=False, **kwargs):
+        super().__init__(
+            in_channels,
+            hidden_dim,
+            drop_path,
+            crack_guided_write=True,
+            write_guidance_centered=True,
+            write_beta_init=write_gate_init,
+            write_beta_max=write_gate_max,
+            orientation_scan=True,
+            orientation_gate_init=scan_gate_init,
+            orientation_gate_max=scan_gate_max,
+            orientation_temperature=orientation_temperature,
+            unified_crack_guidance=True,
+            nonnegative_gates=nonnegative_gates,
+            unified_enable_write=enable_write,
+            unified_enable_scan=enable_scan,
+            orientation_family_logits=orientation_family_logits,
+            **kwargs,
+        )
+
+
+class LastUnifiedCrackAwareVSSStage(nn.Sequential):
+    """Repeated VSS stage whose final block is the fixed unified crack-aware block."""
+
+    def __init__(self, in_channels=0, hidden_dim=0, n=1, write_gate_init=0.05,
+                 scan_gate_init=0.05, write_gate_max=0.5, scan_gate_max=1.0,
+                 orientation_temperature=2.0, nonnegative_gates=False,
+                 enable_write=True, enable_scan=True, orientation_family_logits=False, **kwargs):
+        blocks = []
+        for index in range(n):
+            input_dim = in_channels if index == 0 else hidden_dim
+            if index == n - 1:
+                block = UnifiedCrackAwareVSSBlock(
+                    input_dim, hidden_dim, 0, write_gate_init, scan_gate_init,
+                    write_gate_max, scan_gate_max, orientation_temperature,
+                    nonnegative_gates, enable_write, enable_scan, orientation_family_logits, **kwargs
+                )
+            else:
+                block = VSSBlock(input_dim, hidden_dim, **kwargs)
+            blocks.append(block)
+        super().__init__(*blocks)
+
+
 class SimpleStem(nn.Module):
     def __init__(self, inp, embed_dim, ks=3):
         super().__init__()
@@ -400,6 +884,81 @@ class SimpleStem(nn.Module):
 
     def forward(self, x):
         return self.conv(x)
+
+
+class CrackDetailStemLite(nn.Module):
+    """Light stem that preserves sub-pixel details with high-pass gating and space-to-depth."""
+
+    def __init__(self, inp, embed_dim, ks=3):
+        super().__init__()
+        mid = max(embed_dim // 2, 8)
+        self.first = nn.Sequential(
+            nn.Conv2d(inp, mid, kernel_size=ks, stride=2, padding=autopad(ks), bias=False),
+            nn.BatchNorm2d(mid),
+            nn.SiLU(),
+        )
+        self.local = nn.Sequential(
+            nn.Conv2d(mid, mid, 3, 1, 1, groups=mid, bias=False),
+            nn.BatchNorm2d(mid),
+            nn.SiLU(),
+        )
+        gate_hidden = max(mid // 4, 8)
+        self.detail_gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(mid, gate_hidden, 1),
+            nn.SiLU(),
+            nn.Conv2d(gate_hidden, mid, 1),
+            nn.Sigmoid(),
+        )
+        self.project = nn.Sequential(
+            nn.Conv2d(mid * 4, embed_dim, 1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.SiLU(),
+        )
+
+    def forward(self, x):
+        x = self.first(x)
+        local = self.local(x)
+        detail = x - F.avg_pool2d(x, 3, 1, 1)
+        fused = local + self.detail_gate(local) * detail
+        return self.project(F.pixel_unshuffle(fused, 2))
+
+
+class CrackDetailStemDirectional(nn.Module):
+    """Dual-branch stem using cheap horizontal/vertical differences to retain thin line evidence."""
+
+    def __init__(self, inp, embed_dim, ks=3):
+        super().__init__()
+        mid = max(embed_dim // 2, 8)
+        self.first = nn.Sequential(
+            nn.Conv2d(inp, mid, kernel_size=ks, stride=2, padding=autopad(ks), bias=False),
+            nn.BatchNorm2d(mid),
+            nn.SiLU(),
+        )
+        self.local = nn.Sequential(
+            nn.Conv2d(mid, mid, 3, 2, 1, groups=mid, bias=False),
+            nn.BatchNorm2d(mid),
+            nn.SiLU(),
+            nn.Conv2d(mid, embed_dim, 1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.SiLU(),
+        )
+        self.detail_project = nn.Sequential(
+            nn.Conv2d(mid * 2, embed_dim, 1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.SiLU(),
+        )
+        self.spatial_gate = nn.Sequential(nn.Conv2d(embed_dim, 1, 1), nn.Sigmoid())
+        self.detail_scale = nn.Parameter(torch.tensor(math.atanh(0.1)))
+
+    def forward(self, x):
+        x = self.first(x)
+        local = self.local(x)
+        dx = F.pad((x[..., 1:] - x[..., :-1]).abs(), (0, 1, 0, 0))
+        dy = F.pad((x[..., 1:, :] - x[..., :-1, :]).abs(), (0, 0, 0, 1))
+        detail = F.avg_pool2d(torch.cat((dx, dy), dim=1), 2, 2)
+        detail = self.detail_project(detail)
+        return local + self.detail_scale.tanh() * self.spatial_gate(detail) * detail
 
 
 class VisionClueMerge(nn.Module):
@@ -421,3 +980,58 @@ class VisionClueMerge(nn.Module):
             x[..., 1::2, 1::2]
         ], dim=1)
         return self.pw_linear(y)
+
+
+class CrackMergeLite(nn.Module):
+    """Space-to-depth merge augmented with a cheap anti-aliased local-context residual."""
+
+    def __init__(self, dim, out_dim):
+        super().__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(dim * 4, out_dim, 1, bias=False),
+            nn.BatchNorm2d(out_dim),
+            nn.SiLU(),
+        )
+        self.local = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, 1, 1, groups=dim, bias=False),
+            nn.BatchNorm2d(dim),
+            nn.SiLU(),
+            nn.Conv2d(dim, out_dim, 1, bias=False),
+            nn.BatchNorm2d(out_dim),
+        )
+        self.local_scale = nn.Parameter(torch.tensor(math.atanh(0.1)))
+
+    def forward(self, x):
+        main = self.main(F.pixel_unshuffle(x, 2))
+        local = self.local(F.avg_pool2d(x, 2, 2))
+        return main + self.local_scale.tanh() * local
+
+
+class CrackMergeDirectional(nn.Module):
+    """Downsample by retaining four sub-pixels and explicit H/V inter-subpixel differences."""
+
+    def __init__(self, dim, out_dim):
+        super().__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(dim * 4, out_dim, 1, bias=False),
+            nn.BatchNorm2d(out_dim),
+            nn.SiLU(),
+        )
+        self.detail = nn.Sequential(
+            nn.Conv2d(dim * 2, out_dim, 1, bias=False),
+            nn.BatchNorm2d(out_dim),
+            nn.SiLU(),
+        )
+        self.gate = nn.Sequential(nn.Conv2d(out_dim, 1, 1), nn.Sigmoid())
+        self.detail_scale = nn.Parameter(torch.tensor(math.atanh(0.1)))
+
+    def forward(self, x):
+        q00 = x[..., ::2, ::2]
+        q10 = x[..., 1::2, ::2]
+        q01 = x[..., ::2, 1::2]
+        q11 = x[..., 1::2, 1::2]
+        main = self.main(torch.cat((q00, q10, q01, q11), dim=1))
+        horizontal = (q00 - q01).abs() + (q10 - q11).abs()
+        vertical = (q00 - q10).abs() + (q01 - q11).abs()
+        detail = self.detail(torch.cat((horizontal, vertical), dim=1))
+        return main + self.detail_scale.tanh() * self.gate(detail) * detail

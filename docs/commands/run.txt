@@ -1,0 +1,7 @@
+  python mbyolo_train.py --task train \
+  --data F:\UTS_work_code\YOLO_Yingjie\YOLO_dataset_process\crack-seg\crack-seg.yaml \
+  --config ultralytics/cfg/models/mamba-yolo/yolo-mamba-seg.yaml \
+  --amp \
+  --device 0 \
+  --project ./output_dir/crack-seg \
+  --name yolo-mamba-seg-yolo8

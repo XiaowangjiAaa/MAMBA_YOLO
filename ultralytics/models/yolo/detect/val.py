@@ -82,7 +82,7 @@ class DetectionValidator(BaseValidator):
 
     def get_desc(self):
         """Return a formatted string summarizing class metrics of YOLO model."""
-        return ("%22s" + "%11s" * 6) % ("Class", "Images", "Instances", "Box(P", "R", "mAP50", "mAP50-95)")
+        return ("%22s" + "%11s" * 7) % ("Class", "Images", "Instances", "Box(P", "R", "mAP50", "mAP50-95", "mAP75)")
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
@@ -313,8 +313,8 @@ class DetectionValidator(BaseValidator):
                 val.summarize()
                 if self.is_lvis:
                     val.print_results()  # explicitly call print_results
-                # update mAP50-95 and mAP50
-                stats[self.metrics.keys[-1]], stats[self.metrics.keys[-2]] = (
+                # update mAP50-95 and mAP50 (index 3 = mAP50-95, index 2 = mAP50 in the keys list)
+                stats[self.metrics.keys[3]], stats[self.metrics.keys[2]] = (
                     val.stats[:2] if self.is_coco else [val.results["AP50"], val.results["AP"]]
                 )
             except Exception as e:

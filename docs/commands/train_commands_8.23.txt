@@ -1,0 +1,22 @@
+# 8.23 P5-directional Unified candidate and component ablations
+
+# 1) Pre-flight
+python check_yaml.py --aug23 --quick --device cuda:0
+
+# Shape-only fallback; never use the scan stub for real training
+python check_yaml.py --aug23 --quick --device cpu --imgsz 128 --stub-scan
+
+# 2) Final candidate Q00 seed0 first
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 23F --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 3) If Q00 seed0 passes, complete its three-seed result
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Q00 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# 4) Write-only, Scan-only and role-specific component attribution
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 23A --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# 5) Complete the signed/no-aux control using the existing T01 YAML
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments T01 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# 6) Example mask-specific validation
+python mbyolo_train.py --task val --weights output_dir/crack-seg-8.23/Q00_crack-seg_seed0/weights/best_mask.pt --data ../crack-seg/crack-seg.yaml --device 0 --batch_size 16 --imgsz 640 --crack_metric_conf 0.25 --cldice_iters 20

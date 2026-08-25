@@ -1,0 +1,20 @@
+# 8.12 pre-flight: build all YAMLs, test forward/deepcopy, and verify live auxiliary graphs.
+python check_yaml.py --aug12 --quick --device cuda:0
+# If the selective-scan CUDA extension is unavailable, use shape-only validation:
+# python check_yaml.py --aug12 --quick --device cpu --imgsz 128 --stub-scan
+
+# Phase 1: stem ablation (N00-N02).
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 12S --seeds 0 --continue-on-error
+
+# Phase 2: merge/front-end ablation (N03-N05).
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 12M --seeds 0 --continue-on-error
+
+# Phase 3: unified state-space and complete models (N06-N11).
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 12U --seeds 0 --continue-on-error
+
+# Recommended confirmation: only rerun the winning IDs with two extra seeds.
+# Replace N06 N08 below after comparing seed-0 results.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments N06 N08 --seeds 1 2 --continue-on-error
+
+# Print commands without training (useful before launching a long batch).
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 12S 12M 12U --seeds 0 --dry-run

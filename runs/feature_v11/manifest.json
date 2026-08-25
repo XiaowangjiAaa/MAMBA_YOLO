@@ -1,0 +1,72 @@
+{
+  "model": "ultralytics/cfg/models/mamba-yolo/yolo-mamba-seg-yolo11.yaml",
+  "weights": "output_dir/crack-seg/yolo-mamba-segv11/weights/best.pt",
+  "source": "/data/yinwu/VOCdevkit_All/VOCdevkit_level/VOC2012/JPEGImages/9_levelcrack.jpg",
+  "imgsz": 640,
+  "device": "cuda:0",
+  "reduction": "mean_abs",
+  "matched_state_tensors": 692,
+  "total_state_tensors": 692,
+  "features": [
+    {
+      "layer": "model.1",
+      "type": "VSSBlock",
+      "output": "output",
+      "shape": [
+        1,
+        32,
+        160,
+        160
+      ],
+      "mean": 0.00794423371553421,
+      "mean_abs": 0.7226151823997498,
+      "rms": 1.0173311233520508,
+      "std": 1.0173007249832153
+    },
+    {
+      "layer": "model.3",
+      "type": "VSSBlock",
+      "output": "output",
+      "shape": [
+        1,
+        64,
+        80,
+        80
+      ],
+      "mean": 0.20954032242298126,
+      "mean_abs": 0.7099241614341736,
+      "rms": 0.9897357821464539,
+      "std": 0.9673013687133789
+    },
+    {
+      "layer": "model.5",
+      "type": "Sequential",
+      "output": "output",
+      "shape": [
+        1,
+        128,
+        40,
+        40
+      ],
+      "mean": 0.17768821120262146,
+      "mean_abs": 0.5586989521980286,
+      "rms": 0.7889299988746643,
+      "std": 0.768661379814148
+    },
+    {
+      "layer": "model.7",
+      "type": "VSSBlock",
+      "output": "output",
+      "shape": [
+        1,
+        256,
+        20,
+        20
+      ],
+      "mean": 0.3189617395401001,
+      "mean_abs": 1.3813345432281494,
+      "rms": 1.7976609468460083,
+      "std": 1.76914644241333
+    }
+  ]
+}

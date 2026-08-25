@@ -22,6 +22,7 @@ from .block import (
     C2,
     C3,
     C3TR,
+    C2PSA,
     DFL,
     SPP,
     SPPELAN,
@@ -62,7 +63,7 @@ from .conv import (
     RepConv,
     SpatialAttention,
 )
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect
+from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v11Detect, v11Segment
 from .transformer import (
     AIFI,
     MLP,
@@ -76,7 +77,30 @@ from .transformer import (
     TransformerLayer,
 )
 
-from .mamba_yolo import SimpleStem, VisionClueMerge, VSSBlock, XSSBlock
+from .mamba_yolo import (
+    CrackVSSBlock,
+    CrackVSSBlockV2,
+    CrackMemoryVSSBlock,
+    CrackStructureVSSBlock,
+    UnifiedCrackAwareVSSBlock,
+    LastUnifiedCrackAwareVSSStage,
+    CrackDetailStemLite,
+    CrackDetailStemDirectional,
+    CrackMergeLite,
+    CrackMergeDirectional,
+    CrackWriteVSSBlock,
+    CenteredCrackWriteVSSBlock,
+    LastCrackWriteVSSStage,
+    LastCenteredCrackWriteVSSStage,
+    DiagonalOrientationVSSBlock,
+    OrientationVSSBlock,
+    CrackXSSBlock,
+    CrackXSSBlockV2,
+    SimpleStem,
+    VisionClueMerge,
+    VSSBlock,
+    XSSBlock,
+)
 
 __all__ = (
     "Conv",
@@ -137,5 +161,14 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "Silence",
-    "SimpleStem", "VisionClueMerge", "VSSBlock", "XSSBlock"
+    "C2PSA",
+    "v11Detect",
+    "v11Segment",
+    "SimpleStem", "VisionClueMerge", "VSSBlock", "XSSBlock", "CrackVSSBlock", "CrackXSSBlock",
+    "CrackVSSBlockV2", "CrackXSSBlockV2",
+    "OrientationVSSBlock", "DiagonalOrientationVSSBlock", "CrackWriteVSSBlock",
+    "CenteredCrackWriteVSSBlock", "LastCrackWriteVSSStage", "LastCenteredCrackWriteVSSStage",
+    "CrackMemoryVSSBlock", "CrackStructureVSSBlock",
+    "UnifiedCrackAwareVSSBlock", "CrackDetailStemLite", "CrackDetailStemDirectional",
+    "LastUnifiedCrackAwareVSSStage", "CrackMergeLite", "CrackMergeDirectional"
 )

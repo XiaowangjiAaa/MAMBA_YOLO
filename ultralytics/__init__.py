@@ -1,6 +1,6 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
-__version__ = "8.2.29"
+__version__ = "8.2.29-mamba-yolo11"
 
 import os
 

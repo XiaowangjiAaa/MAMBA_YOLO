@@ -1,0 +1,19 @@
+# 8.24 corrected Q00 H/V family-logit experiments
+
+# 1) Pre-flight on CUDA
+python check_yaml.py --aug24 --quick --device cuda:0
+
+# Shape-only CPU fallback; never use the selective-scan stub for training
+python check_yaml.py --aug24 --quick --device cpu --imgsz 128 --stub-scan
+
+# 2) Primary causal experiment: corrected Q00 on all three seeds
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24F --seeds  2 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 3) Seed-0 screen: softer temperature, lower scan cap, role split, learned gate init
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24R --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 4) Complete only the seed-0 winner; replace U03 if another variant wins
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments U03 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 5) Example mask-specific revalidation
+python mbyolo_train.py --task val --weights output_dir/crack-seg-8.24/U00_crack-seg_seed0/weights/best_mask.pt --data ../crack-seg/crack-seg.yaml --device 0 --batch_size 16 --imgsz 640 --crack_metric_conf 0.25 --cldice_iters 20

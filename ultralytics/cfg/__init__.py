@@ -130,6 +130,7 @@ CFG_FRACTION_KEYS = {  # fractional float arguments with 0.0<=values<=1.0
     "conf",
     "iou",
     "fraction",
+    "crack_metric_conf",
 }
 CFG_INT_KEYS = {  # integer-only arguments
     "epochs",
@@ -143,6 +144,7 @@ CFG_INT_KEYS = {  # integer-only arguments
     "line_width",
     "nbs",
     "save_period",
+    "cldice_iters",
 }
 CFG_BOOL_KEYS = {  # boolean-only arguments
     "save",

@@ -1,0 +1,197 @@
+=======================================================================
+  8.9 Mamba-YOLO 裂缝结构实验训练命令
+  配置目录: ultralytics/cfg/models/mamba-yolo/8.9-experiments
+  数据集: ../crack-seg/crack-seg.yaml
+  默认: device=0,1 epochs=300 imgsz=640 save_period=10
+=======================================================================
+
+说明：
+  1. 首先运行预检查，不通过时不要开始批量训练。
+  2. Phase A 只补 seed=1、2；已有 seed=0 结果无需重复。
+  3. Phase B/C 第一轮只运行 seed=0。
+  4. E06 自动使用 patience=300，保证完整训练 300 epoch。
+  5. 只有超过 C2 的配置才补 seed=1、2。
+
+
+########################################################################
+## 0. 预检查
+########################################################################
+
+# 快速检查全部 8.9 YAML：构建、forward、EMA deepcopy、AMP、loss、结构约束
+python check_yaml.py --aug9 --device cuda:0 --quick
+
+# 完整检查主候选，包括 DDP 构建测试
+python check_yaml.py --experiments E10 --device cuda:0
+
+# 查看实验列表
+python batch_train.py --list --list-group A
+python batch_train.py --list --list-group B
+python batch_train.py --list --list-group C
+
+
+########################################################################
+## Phase A：多 seed 重复性
+## E00=B0，E01=S1，E02=C2；分别补 seed=1、2
+########################################################################
+
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase A --seeds 1 2 --device 0,1 --epochs 300 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+
+########################################################################
+## Phase B：拆解 C2 辅助监督
+## E03=guidance only
+## E04=orientation only
+## E05=低权重双监督
+## E06=C1 无监督但完整训练 300 epoch
+########################################################################
+
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase B --seeds 0 --device 0,1 --epochs 300 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+
+########################################################################
+## Phase C：Centered Write 与 Last-P4 消融
+## 推荐优先顺序 E10 > E09 > E08 > E07
+########################################################################
+
+# 按推荐顺序训练
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments E10 E09 E08 E07 --seeds 0 --device 0,1 --epochs 300 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+# 或按编号顺序训练整个 Phase C
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase C --seeds 0 --device 0,1 --epochs 300 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+
+########################################################################
+## 单项训练命令
+########################################################################
+
+# E00：B0 baseline
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/00-b0-yolo11.yaml --device 0,1 --epochs 300 --patience 100 --seed 1 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E00_seed1 --amp --imgsz 640
+
+# E01：S1 P3 orientation scan
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/01-s1-p3-scan-yolo11.yaml --device 0,1 --epochs 300 --patience 100 --seed 1 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E01_seed1 --amp --imgsz 640
+
+# E02：C2 reference
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/02-c2-reference-yolo11.yaml --device 0,1 --epochs 300 --patience 100 --seed 1 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E02_seed1 --amp --imgsz 640
+
+# E03：C2 guidance supervision only
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/03-c2-guidance-only-yolo11.yaml --device 0,1 --epochs 300 --patience 100 --seed 0 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E03_seed0 --amp --imgsz 640
+
+# E04：C2 orientation supervision only
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/04-c2-orientation-only-yolo11.yaml --device 0,1 --epochs 300 --patience 100 --seed 0 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E04_seed0 --amp --imgsz 640
+
+# E05：C2 low auxiliary weights
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/05-c2-low-aux-yolo11.yaml --device 0,1 --epochs 300 --patience 100 --seed 0 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E05_seed0 --amp --imgsz 640
+
+# E06：C1 完整 300 epoch 控制；patience 必须不小于 epochs
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/06-c1-no-aux-control-yolo11.yaml --device 0,1 --epochs 300 --patience 300 --seed 0 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E06_seed0 --amp --imgsz 640
+
+# E07：all-P4 centered write
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/07-centered-p4-write-sup-yolo11.yaml --device 0,1 --epochs 300 --patience 100 --seed 0 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E07_seed0 --amp --imgsz 640
+
+# E08：P3 scan + all-P4 centered write
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/08-p3-scan-centered-p4-write-sup-yolo11.yaml --device 0,1 --epochs 300 --patience 100 --seed 0 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E08_seed0 --amp --imgsz 640
+
+# E09：P3 scan + 最后 P4 block 使用旧 write
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/09-p3-scan-last-p4-write-sup-yolo11.yaml --device 0,1 --epochs 300 --patience 100 --seed 0 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E09_seed0 --amp --imgsz 640
+
+# E10：主候选，P3 scan + 最后 P4 block centered write
+python mbyolo_train.py --task train --data ../crack-seg/crack-seg.yaml --config ultralytics/cfg/models/mamba-yolo/8.9-experiments/10-p3-scan-last-p4-centered-write-sup-yolo11.yaml --device 0,1 --epochs 300 --patience 100 --seed 0 --save_period 10 --batch_size 512 --workers 128 --optimizer SGD --project ./output_dir/crack-seg-8.9 --name E10_seed0 --amp --imgsz 640
+
+
+########################################################################
+## 常用控制
+########################################################################
+
+# 只预览命令，不训练
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase A B C --seeds 0 --dry-run
+
+# 跳过 batch_train_status.json 中已完成的 experiment+seed
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase B C --seeds 0 --skip-completed --continue-on-error
+
+# 仅在 E10 seed=0 超过 C2 后补 seed=1、2
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments E10 --seeds 1 2 --continue-on-error
+
+
+########################################################################
+## 8.12 crack front-end + unified VSS experiments
+########################################################################
+
+# Validate all 8.12 YAMLs before training.
+python check_yaml.py --aug12 --quick --device cuda:0
+
+# Isolated Stem, Merge, then Unified-VSS phases.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 12S --seeds 0 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 12M --seeds 0 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 12U --seeds 0 --continue-on-error
+
+# Shape-only validation if the selective-scan extension is unavailable.
+python check_yaml.py --aug12 --quick --device cpu --imgsz 128 --stub-scan
+
+
+########################################################################
+## 8.17 fixed architecture: tune parameters, do not change modules
+########################################################################
+
+# Check the six YAMLs.
+python check_yaml.py --aug17 --quick --device cuda:0
+
+# Phase 17A: auxiliary supervision strength (T00-T02).
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 17A --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+# Phase 17G: gate initialization and direction temperature (T03-T05).
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 17G --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+# After selecting the seed-0 winner, repeat it with seed 1 and 2 (replace T00 if needed).
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments T00 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+# Evaluate the segmentation-specific checkpoint. Adjust the run folder if it was auto-incremented.
+python mbyolo_train.py --task val --weights output_dir/crack-seg-8.17/T00_crack-seg_seed0/weights/best_mask.pt --data ../crack-seg/crack-seg.yaml --device 0 --batch_size 32 --imgsz 640 --crack_metric_conf 0.25 --cldice_iters 20
+
+
+########################################################################
+## 8.19 focused causal control and theory-consistent Unified gates
+########################################################################
+
+# Check R00-R02 before training.
+python check_yaml.py --aug19 --quick --device cuda:0
+
+# Mandatory fair control: same P3/P4 front end and P5 as T00, Standard VSS only.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 19C --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+# Nonnegative Unified gates without/with weak gate regularization.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 19G --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+# Only after analysing seed0, repeat retained candidates.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments R00 R01 R02 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+
+########################################################################
+## 8.23 P5-directional final candidate and Unified component attribution
+########################################################################
+
+python check_yaml.py --aug23 --quick --device cuda:0
+
+# Q00 first: P3/P4/P5 directional merges + full nonnegative Unified.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 23F --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# If Q00 seed0 passes, complete seed1/2.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Q00 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# Write-only, Scan-only and P3-write/P4-scan attribution.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 23A --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# Existing signed/no-aux T01 control: add missing seeds.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments T01 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+
+########################################################################
+## 8.24 corrected Q00 H/V family logits and stability controls
+########################################################################
+
+python check_yaml.py --aug24 --quick --device cuda:0
+
+# Required causal comparison: U00 differs from Q00 only in H/V score mapping.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24F --seeds 0 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# Seed-0 stability screen; only the winner should receive seed1/2.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24H 24R --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error

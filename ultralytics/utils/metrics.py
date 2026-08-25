@@ -637,7 +637,7 @@ class Metric(SimpleClass):
         map50(): Mean AP at IoU threshold of 0.5 for all classes. Returns: Float.
         map75(): Mean AP at IoU threshold of 0.75 for all classes. Returns: Float.
         map(): Mean AP at IoU thresholds from 0.5 to 0.95 for all classes. Returns: Float.
-        mean_results(): Mean of results, returns mp, mr, map50, map.
+        mean_results(): Mean of results, returns mp, mr, map50, map, map75.
         class_result(i): Class-aware result, returns p[i], r[i], ap50[i], ap[i].
         maps(): mAP of each class. Returns: Array of mAP scores, shape: (nc,).
         fitness(): Model fitness as a weighted combination of metrics. Returns: Float.
@@ -724,8 +724,8 @@ class Metric(SimpleClass):
         return self.all_ap.mean() if len(self.all_ap) else 0.0
 
     def mean_results(self):
-        """Mean of results, return mp, mr, map50, map."""
-        return [self.mp, self.mr, self.map50, self.map]
+        """Mean of results, return mp, mr, map50, map, map75."""
+        return [self.mp, self.mr, self.map50, self.map, self.map75]
 
     def class_result(self, i):
         """Class-aware result, return p[i], r[i], ap50[i], ap[i]."""
@@ -741,7 +741,7 @@ class Metric(SimpleClass):
 
     def fitness(self):
         """Model fitness as a weighted combination of metrics."""
-        w = [0.0, 0.0, 0.1, 0.9]  # weights for [P, R, mAP@0.5, mAP@0.5:0.95]
+        w = [0.0, 0.0, 0.1, 0.9, 0.0]  # weights for [P, R, mAP@0.5, mAP@0.5:0.95, mAP@0.75]
         return (np.array(self.mean_results()) * w).sum()
 
     def update(self, results):
@@ -849,10 +849,10 @@ class DetMetrics(SimpleClass):
     @property
     def keys(self):
         """Returns a list of keys for accessing specific metrics."""
-        return ["metrics/precision(B)", "metrics/recall(B)", "metrics/mAP50(B)", "metrics/mAP50-95(B)"]
+        return ["metrics/precision(B)", "metrics/recall(B)", "metrics/mAP50(B)", "metrics/mAP50-95(B)", "metrics/mAP75(B)"]
 
     def mean_results(self):
-        """Calculate mean of detected objects & return precision, recall, mAP50, and mAP50-95."""
+        """Calculate mean of detected objects & return precision, recall, mAP50, mAP50-95, and mAP75."""
         return self.box.mean_results()
 
     def class_result(self, i):
@@ -977,19 +977,29 @@ class SegmentMetrics(SimpleClass):
             "metrics/recall(B)",
             "metrics/mAP50(B)",
             "metrics/mAP50-95(B)",
+            "metrics/mAP75(B)",
             "metrics/precision(M)",
             "metrics/recall(M)",
             "metrics/mAP50(M)",
             "metrics/mAP50-95(M)",
+            "metrics/mAP75(M)",
         ]
 
     def mean_results(self):
         """Return the mean metrics for bounding box and segmentation results."""
-        return self.box.mean_results() + self.seg.mean_results()
+        return [
+            self.box.mp, self.box.mr, self.box.map50, self.box.map, self.box.map75,
+            self.seg.mp, self.seg.mr, self.seg.map50, self.seg.map, self.seg.map75,
+        ]
 
     def class_result(self, i):
-        """Returns classification results for a specified class index."""
-        return self.box.class_result(i) + self.seg.class_result(i)
+        """Returns classification results for a specified class index (box + mask)."""
+        bp, br, bap50, bap = self.box.class_result(i)
+        sp, sr, sap50, sap = self.seg.class_result(i)
+        # Get mAP75 from all_ap array if available
+        bap75 = self.box.all_ap[i, 5] if len(self.box.all_ap) else 0.0
+        sap75 = self.seg.all_ap[i, 5] if len(self.seg.all_ap) else 0.0
+        return [bp, br, bap50, bap, bap75, sp, sr, sap50, sap, sap75]
 
     @property
     def maps(self):
@@ -1119,10 +1129,12 @@ class PoseMetrics(SegmentMetrics):
             "metrics/recall(B)",
             "metrics/mAP50(B)",
             "metrics/mAP50-95(B)",
+            "metrics/mAP75(B)",
             "metrics/precision(P)",
             "metrics/recall(P)",
             "metrics/mAP50(P)",
             "metrics/mAP50-95(P)",
+            "metrics/mAP75(P)",
         ]
 
     def mean_results(self):
@@ -1248,10 +1260,10 @@ class OBBMetrics(SimpleClass):
     @property
     def keys(self):
         """Returns a list of keys for accessing specific metrics."""
-        return ["metrics/precision(B)", "metrics/recall(B)", "metrics/mAP50(B)", "metrics/mAP50-95(B)"]
+        return ["metrics/precision(B)", "metrics/recall(B)", "metrics/mAP50(B)", "metrics/mAP50-95(B)", "metrics/mAP75(B)"]
 
     def mean_results(self):
-        """Calculate mean of detected objects & return precision, recall, mAP50, and mAP50-95."""
+        """Calculate mean of detected objects & return precision, recall, mAP50, mAP50-95, and mAP75."""
         return self.box.mean_results()
 
     def class_result(self, i):

@@ -1,0 +1,19 @@
+# 8.17 fixed-method tuning commands
+
+# 1) Pre-flight all fixed-architecture YAMLs
+python check_yaml.py --aug17 --quick --device cuda:0
+
+# CPU shape-only fallback (never use the stub for real training)
+python check_yaml.py --aug17 --quick --device cpu --imgsz 128 --stub-scan
+
+# 2) Tune auxiliary supervision first: T00, T01, T02
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 17A --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 3) Tune gate initialization and orientation temperature: T03, T04, T05
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 17G --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 4) Replace T00 with the seed-0 winner, then repeat seeds 1 and 2
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments T00 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+# 5) Validate the mask-specific checkpoint (adjust run directory if Ultralytics auto-incremented the name)
+python mbyolo_train.py --task val --weights output_dir/crack-seg-8.17/T00_crack-seg_seed0/weights/best_mask.pt --data ../crack-seg/crack-seg.yaml --device 0 --batch_size 32 --imgsz 640 --crack_metric_conf 0.25 --cldice_iters 20

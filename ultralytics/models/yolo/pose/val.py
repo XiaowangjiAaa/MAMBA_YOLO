@@ -47,18 +47,20 @@ class PoseValidator(DetectionValidator):
 
     def get_desc(self):
         """Returns description of evaluation metrics in string format."""
-        return ("%22s" + "%11s" * 10) % (
+        return ("%22s" + "%11s" * 12) % (
             "Class",
             "Images",
             "Instances",
             "Box(P",
             "R",
             "mAP50",
-            "mAP50-95)",
+            "mAP50-95",
+            "mAP75)",
             "Pose(P",
             "R",
             "mAP50",
-            "mAP50-95)",
+            "mAP50-95",
+            "mAP75)",
         )
 
     def postprocess(self, preds):
@@ -240,7 +242,7 @@ class PoseValidator(DetectionValidator):
                     eval.evaluate()
                     eval.accumulate()
                     eval.summarize()
-                    idx = i * 4 + 2
+                    idx = i * 5 + 2
                     stats[self.metrics.keys[idx + 1]], stats[self.metrics.keys[idx]] = eval.stats[
                         :2
                     ]  # update mAP50-95 and mAP50

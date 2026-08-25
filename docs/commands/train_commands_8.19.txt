@@ -1,0 +1,19 @@
+# 8.19 focused causal-control and Unified-gate optimization
+
+# 1) Pre-flight all three YAML files
+python check_yaml.py --aug19 --quick --device cuda:0
+
+# Shape-only fallback; never use the selective-scan stub for real training
+python check_yaml.py --aug19 --quick --device cpu --imgsz 128 --stub-scan
+
+# 2) Mandatory fair control first: R00 seed0
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 19C --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 3) Same Unified module with theory-consistent gates: R01/R02 seed0
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 19G --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 4) After seed0 analysis, repeat the retained candidates with seeds 1 and 2
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments R00 R01 R02 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 512 --workers 128 --save-period 10 --continue-on-error
+
+# 5) Example: independently validate a mask-specific checkpoint
+python mbyolo_train.py --task val --weights output_dir/crack-seg-8.19/R01_crack-seg_seed0/weights/best_mask.pt --data ../crack-seg/crack-seg.yaml --device 0 --batch_size 32 --imgsz 640 --crack_metric_conf 0.25 --cldice_iters 20

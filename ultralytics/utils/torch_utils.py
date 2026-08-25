@@ -464,7 +464,24 @@ class ModelEMA:
 
     def __init__(self, model, decay=0.9999, tau=2000, updates=0):
         """Create EMA."""
-        self.ema = deepcopy(de_parallel(model)).eval()  # FP32 EMA
+        m = de_parallel(model)
+
+        # Monkey-patch torch.Tensor.__deepcopy__ to handle non-leaf tensors
+        # that arise from custom Mamba blocks (torch.stack, etc.) when the
+        # underlying Parameter tensors are not detached properly by older
+        # PyTorch versions (e.g. 2.3.0).
+        _original_deepcopy = torch.Tensor.__deepcopy__
+        def _patched_deepcopy(tensor, memo):
+            if tensor.is_leaf:
+                return _original_deepcopy(tensor, memo)
+            leaf = tensor.detach().clone()
+            memo[id(tensor)] = leaf
+            return leaf
+        torch.Tensor.__deepcopy__ = _patched_deepcopy
+        try:
+            self.ema = deepcopy(m).eval()
+        finally:
+            torch.Tensor.__deepcopy__ = _original_deepcopy
         self.updates = updates  # number of EMA updates
         self.decay = lambda x: decay * (1 - math.exp(-x / tau))  # decay exponential ramp (to help early epochs)
         for p in self.ema.parameters():

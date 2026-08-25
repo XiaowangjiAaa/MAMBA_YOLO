@@ -948,8 +948,8 @@ def plot_results(file="path/to/results.csv", dir="", segment=False, pose=False, 
         fig, ax = plt.subplots(2, 2, figsize=(6, 6), tight_layout=True)
         index = [1, 4, 2, 3]
     elif segment:
-        fig, ax = plt.subplots(2, 8, figsize=(18, 6), tight_layout=True)
-        index = [1, 2, 3, 4, 5, 6, 9, 10, 13, 14, 15, 16, 7, 8, 11, 12]
+        fig, ax = plt.subplots(2, 9, figsize=(21, 6), tight_layout=True)
+        index = None  # resolved by column name below so extra segmentation metrics cannot shift loss plots
     elif pose:
         fig, ax = plt.subplots(2, 9, figsize=(21, 6), tight_layout=True)
         index = [1, 2, 3, 4, 5, 6, 7, 10, 11, 14, 15, 16, 17, 18, 8, 9, 12, 13]
@@ -964,7 +964,18 @@ def plot_results(file="path/to/results.csv", dir="", segment=False, pose=False, 
             data = pd.read_csv(f)
             s = [x.strip() for x in data.columns]
             x = data.values[:, 0]
-            for i, j in enumerate(index):
+            if segment:
+                desired = [
+                    "train/box_loss", "train/seg_loss", "train/cls_loss", "train/dfl_loss",
+                    "metrics/precision(B)", "metrics/recall(B)", "metrics/mAP75(B)",
+                    "metrics/precision(M)", "metrics/mIoU(M)", "metrics/clDice(M)",
+                    "metrics/mAP50-95(M)", "metrics/mAP75(M)", "val/box_loss", "val/seg_loss",
+                    "metrics/mAP50(B)", "metrics/mAP50-95(B)", "metrics/recall(M)", "metrics/mAP50(M)",
+                ]
+                plot_index = [s.index(name) for name in desired if name in s]
+            else:
+                plot_index = index
+            for i, j in enumerate(plot_index):
                 y = data.values[:, j].astype("float")
                 # y[y == 0] = np.nan  # don't show zero values
                 ax[i].plot(x, y, marker=".", label=f.stem, linewidth=2, markersize=8)  # actual results

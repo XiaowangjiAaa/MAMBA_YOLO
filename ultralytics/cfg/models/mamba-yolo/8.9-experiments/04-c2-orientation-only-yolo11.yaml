@@ -1,0 +1,31 @@
+# 8.9-E04: C2 architecture with direction supervision only; P4 guidance is task-supervised only.
+nc: 1
+scale: n
+guidance_loss_weight: 0.0
+orientation_loss_weight: 0.02
+scales: {n: [0.33, 0.25, 1024], s: [0.33, 0.50, 1024], m: [0.67, 0.75, 768], l: [1.00, 1.00, 512], x: [1.00, 1.25, 512]}
+backbone:
+  - [-1, 1, SimpleStem, [128, 3]]
+  - [-1, 3, VSSBlock, [128]]
+  - [-1, 1, VisionClueMerge, [256]]
+  - [-1, 3, OrientationVSSBlock, [256]]  # only this branch has auxiliary supervision
+  - [-1, 1, VisionClueMerge, [512]]
+  - [-1, 9, CrackWriteVSSBlock, [512]]
+  - [-1, 1, VisionClueMerge, [1024]]
+  - [-1, 3, VSSBlock, [1024]]
+  - [-1, 1, SPPF, [1024, 5]]
+  - [-1, 2, C2PSA, [1024]]
+head:
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 5], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [512]]
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 3], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [256]]
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [512]]
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 9], 1, Concat, [1]]
+  - [-1, 3, VSSBlock, [1024]]
+  - [[15, 18, 21], 1, v11Segment, [nc, 32, 256]]

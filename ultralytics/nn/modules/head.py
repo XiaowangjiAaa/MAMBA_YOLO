@@ -10,11 +10,11 @@ from torch.nn.init import constant_, xavier_uniform_
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
 
 from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto
-from .conv import Conv
+from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
-__all__ = "Detect", "Segment", "Pose", "Classify", "OBB", "RTDETRDecoder"
+__all__ = "Detect", "Segment", "v11Detect", "v11Segment", "Pose", "Classify", "OBB", "RTDETRDecoder"
 
 
 class Detect(nn.Module):
@@ -89,6 +89,36 @@ class Detect(nn.Module):
         return dist2bbox(bboxes, anchors, xywh=True, dim=1)
 
 
+class v11Detect(Detect):
+    """
+    YOLO11 Detect head with DWConv for the classification branch.
+
+    Compared to standard YOLOv8 Detect, this head uses depthwise separable
+    convolutions (DWConv) in the classification branch (cv3) to reduce
+    parameters and improve inference speed while maintaining accuracy.
+    The regression branch (cv2) remains identical to YOLOv8.
+
+    YOLO11 detection head key differences from v8:
+        - cv2 (regression): same as v8 (Conv -> Conv -> Conv2d)
+        - cv3 (classification): DWConv -> PointwiseConv for each of the two
+          intermediate layers, reducing params by ~68% vs standard Conv
+    """
+
+    def __init__(self, nc=80, ch=()):
+        """Initialize YOLO11 detection head with DWConv classification branch."""
+        super().__init__(nc, ch)
+        c3 = max(ch[0], min(self.nc, 100))  # channel for cls branch
+        # Rebuild cv3 with DWConv (depthwise separable conv) for classification
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(
+                nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
+                nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+                nn.Conv2d(c3, self.nc, 1),
+            )
+            for x in ch
+        )
+
+
 class Segment(Detect):
     """YOLOv8 Segment head for segmentation models."""
 
@@ -112,6 +142,42 @@ class Segment(Detect):
         if self.training:
             return x, mc, p
         return (torch.cat([x, mc], 1), p) if self.export else (torch.cat([x[0], mc], 1), (x[1], mc, p))
+
+
+class v11Segment(Segment):
+    """
+    YOLO11 Segment head with DWConv for both classification and mask branches.
+
+    Extends the standard YOLOv8 Segment head with YOLO11's DWConv optimization:
+        - cv2 (regression): same as v8 (Conv -> Conv -> Conv2d)
+        - cv3 (classification): DWConv -> PointwiseConv (like v11Detect)
+        - cv4 (mask coefficients): DWConv -> PointwiseConv (YOLO11 style)
+        - proto (mask prototypes): unchanged from v8
+    """
+
+    def __init__(self, nc=80, nm=32, npr=256, ch=()):
+        """Initialize YOLO11 segmentation head with DWConv branches."""
+        super().__init__(nc, nm, npr, ch)
+        # Rebuild cv3 with DWConv (like v11Detect)
+        c3 = max(ch[0], min(self.nc, 100))
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(
+                nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
+                nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+                nn.Conv2d(c3, self.nc, 1),
+            )
+            for x in ch
+        )
+        # Rebuild cv4 (mask coefficients) with DWConv
+        c4 = max(ch[0] // 4, self.nm)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(
+                nn.Sequential(DWConv(x, x, 3), Conv(x, c4, 1)),
+                nn.Sequential(DWConv(c4, c4, 3), Conv(c4, c4, 1)),
+                nn.Conv2d(c4, self.nm, 1),
+            )
+            for x in ch
+        )
 
 
 class OBB(Detect):

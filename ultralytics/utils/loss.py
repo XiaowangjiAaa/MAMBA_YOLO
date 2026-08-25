@@ -255,6 +255,90 @@ class v8SegmentationLoss(v8DetectionLoss):
         """Initializes the v8SegmentationLoss class, taking a de-paralleled model as argument."""
         super().__init__(model)
         self.overlap = model.args.overlap_mask
+        self.model = model
+        self.guidance_loss_weight = float(model.yaml.get("guidance_loss_weight", 0.0))
+        self.guidance_dice_weight = float(model.yaml.get("guidance_dice_weight", 1.0))
+        self.orientation_loss_weight = float(model.yaml.get("orientation_loss_weight", 0.0))
+        self.gate_regularization_weight = float(model.yaml.get("gate_regularization_weight", 0.0))
+
+    def _union_mask(self, batch, batch_size):
+        """Convert overlapping or per-instance training masks to one binary crack mask per image."""
+        masks = batch["masks"].to(self.device).float()
+        if self.overlap:
+            return (masks[:batch_size] > 0).float()
+        union = masks.new_zeros((batch_size, *masks.shape[-2:]))
+        batch_idx = batch["batch_idx"].long().to(self.device)
+        for image_idx in range(batch_size):
+            image_masks = masks[batch_idx == image_idx]
+            if image_masks.numel():
+                union[image_idx] = image_masks.amax(dim=0)
+        return (union > 0).float()
+
+    @staticmethod
+    def _probability_guidance_loss(guidance, target, dice_weight):
+        target = F.interpolate(target[:, None], guidance.shape[-2:], mode="nearest")
+        with torch.cuda.amp.autocast(enabled=False):
+            probability = guidance.float().clamp(1e-5, 1.0 - 1e-5)
+            bce = F.binary_cross_entropy(probability, target)
+            intersection = (probability * target).sum(dim=(1, 2, 3))
+            denominator = probability.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
+            dice = 1.0 - ((2.0 * intersection + 1.0) / (denominator + 1.0)).mean()
+        return bce + dice_weight * dice
+
+    @staticmethod
+    def _orientation_guidance_loss(orientation, target):
+        """Supervise undirected boundary tangents as (cos(2 theta), sin(2 theta))."""
+        with torch.cuda.amp.autocast(enabled=False):
+            target = F.interpolate(target[:, None], orientation.shape[-2:], mode="bilinear", align_corners=False)
+            sobel_x = target.new_tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]).view(1, 1, 3, 3)
+            sobel_y = target.new_tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]).view(1, 1, 3, 3)
+            grad_x = F.conv2d(target, sobel_x, padding=1)
+            grad_y = F.conv2d(target, sobel_y, padding=1)
+            magnitude_sq = grad_x.square() + grad_y.square()
+            valid = magnitude_sq > 1e-4
+            denominator = magnitude_sq.clamp_min(1e-6)
+            target_orientation = torch.cat(
+                ((grad_y.square() - grad_x.square()) / denominator, -2.0 * grad_x * grad_y / denominator), dim=1
+            )
+            difference = F.smooth_l1_loss(orientation.float(), target_orientation, reduction="none")
+            difference = difference.mean(dim=1, keepdim=True)
+        if valid.any():
+            return difference[valid].mean()
+        return orientation.sum() * 0.0
+
+    def _structure_guidance_loss(self, batch, batch_size):
+        auxiliary = torch.zeros((), device=self.device)
+        if self.gate_regularization_weight > 0.0:
+            gate_terms = []
+            for module in self.model.modules():
+                if not getattr(module, "unified_crack_guidance", False):
+                    continue
+                for accessor in ("effective_write_gate", "effective_orientation_gate"):
+                    method = getattr(module, accessor, None)
+                    gate = method() if method is not None else None
+                    if gate is not None:
+                        gate_terms.append(gate.float().square())
+            if gate_terms:
+                auxiliary = auxiliary + self.gate_regularization_weight * torch.stack(gate_terms).mean()
+
+        if self.guidance_loss_weight <= 0.0 and self.orientation_loss_weight <= 0.0:
+            return auxiliary
+        target = self._union_mask(batch, batch_size)
+        probability_losses, orientation_losses = [], []
+        for module in self.model.modules():
+            guidance = getattr(module, "last_guidance", None)
+            orientation = getattr(module, "last_orientation", None)
+            if guidance is not None and self.guidance_loss_weight > 0.0:
+                probability_losses.append(
+                    self._probability_guidance_loss(guidance, target, self.guidance_dice_weight)
+                )
+            if orientation is not None and self.orientation_loss_weight > 0.0:
+                orientation_losses.append(self._orientation_guidance_loss(orientation, target))
+        if probability_losses:
+            auxiliary = auxiliary + self.guidance_loss_weight * torch.stack(probability_losses).mean()
+        if orientation_losses:
+            auxiliary = auxiliary + self.orientation_loss_weight * torch.stack(orientation_losses).mean()
+        return auxiliary
 
     def __call__(self, preds, batch):
         """Calculate and return the loss for the YOLO model."""
@@ -336,6 +420,9 @@ class v8SegmentationLoss(v8DetectionLoss):
         loss[1] *= self.hyp.box  # seg gain
         loss[2] *= self.hyp.cls  # cls gain
         loss[3] *= self.hyp.dfl  # dfl gain
+
+        # Keep the public four-loss interface stable by including optional structure supervision in seg_loss.
+        loss[1] += self._structure_guidance_loss(batch, batch_size)
 
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 

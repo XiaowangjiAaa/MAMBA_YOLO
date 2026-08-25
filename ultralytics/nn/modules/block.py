@@ -37,6 +37,7 @@ __all__ = (
     "CBFuse",
     "CBLinear",
     "Silence",
+    "C2PSA",
 )
 
 
@@ -682,3 +683,48 @@ class CBFuse(nn.Module):
         target_size = xs[-1].shape[2:]
         res = [F.interpolate(x[self.idx[i]], size=target_size, mode="nearest") for i, x in enumerate(xs[:-1])]
         return torch.sum(torch.stack(res + xs[-1:]), dim=0)
+
+
+# ==================== YOLO11 modules ====================
+
+
+class C2PSA(nn.Module):
+    """
+    C2PSA - Cross Stage Partial with Pyramid Squeeze Attention (YOLO11).
+
+    A CSP-style module that splits channels into two paths: one passes through
+    a series of PSA (Pyramid Squeeze Attention) blocks, while the other is a
+    direct skip connection. The two branches are then concatenated and fused.
+
+    This is the attention mechanism introduced in YOLO11, placed after SPPF in
+    the backbone to enhance multi-scale feature representation with spatial attention.
+
+    Args:
+        c1 (int): Input channels.
+        c2 (int): Output channels (must equal c1).
+        n (int): Number of PSA blocks (default: 1).
+        e (float): Expansion ratio for hidden channels (default: 0.5).
+    """
+
+    def __init__(self, c1, c2, n=1, e=0.5):
+        super().__init__()
+        assert c1 == c2, f"C2PSA requires c1 == c2, got c1={c1}, c2={c2}"
+        self.c = int(c1 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv(2 * self.c, c1, 1)
+        self.m = nn.ModuleList(
+            nn.Sequential(
+                Conv(self.c, self.c // 2, 1),
+                Conv(self.c // 2, self.c // 2, 3),
+                nn.Conv2d(self.c // 2, self.c, 1),
+                nn.Sigmoid(),
+            )
+            for _ in range(n)
+        )
+
+    def forward(self, x):
+        """Forward pass: split channels, apply attention, fuse."""
+        a, b = self.cv1(x).chunk(2, dim=1)
+        for m_block in self.m:
+            b = b * m_block(b)
+        return self.cv2(torch.cat((a, b), 1))

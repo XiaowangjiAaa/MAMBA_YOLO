@@ -96,6 +96,70 @@ class CrossMerge(torch.autograd.Function):
         return xs, None, None
 
 
+_SCAN_ORDER_CACHE = {}
+
+
+def _diagonal_order(height, width, anti=False):
+    """Return a flattened order that keeps pixels from each diagonal contiguous."""
+    order = []
+    if anti:
+        keys = range(height + width - 1)
+        for key in keys:
+            diagonal = [(row, key - row) for row in range(height) if 0 <= key - row < width]
+            order.extend(row * width + col for row, col in diagonal)
+    else:
+        keys = range(-(width - 1), height)
+        for key in keys:
+            diagonal = [(row, row - key) for row in range(height) if 0 <= row - key < width]
+            order.extend(row * width + col for row, col in diagonal)
+    return order
+
+
+def get_scan_orders(height, width, mode, device):
+    """Build scan and inverse-scan permutations for oriented selective scan."""
+    cache_key = (height, width, mode, str(device))
+    if cache_key in _SCAN_ORDER_CACHE:
+        return _SCAN_ORDER_CACHE[cache_key]
+
+    row = list(range(height * width))
+    col = [r * width + c for c in range(width) for r in range(height)]
+    forward = [row, col]
+    family_ids = [0, 1]
+    if mode == "oriented_hvd":
+        forward.extend((_diagonal_order(height, width), _diagonal_order(height, width, anti=True)))
+        family_ids.extend((2, 3))
+    orders = forward + [list(reversed(order)) for order in forward]
+    family_ids = family_ids + family_ids
+    orders = torch.tensor(orders, dtype=torch.long, device=device)
+    inverse = torch.empty_like(orders)
+    positions = torch.arange(height * width, device=device).expand_as(orders)
+    inverse.scatter_(1, orders, positions)
+    family_ids = torch.tensor(family_ids, dtype=torch.long, device=device)
+    _SCAN_ORDER_CACHE[cache_key] = (orders, inverse, family_ids)
+    return orders, inverse, family_ids
+
+
+def ordered_scan(x, orders):
+    """Convert BCHW features to BKCL sequences using arbitrary spatial permutations."""
+    batch, channels, height, width = x.shape
+    flat = x.flatten(2)
+    return flat[:, None].expand(-1, orders.shape[0], -1, -1).gather(
+        -1, orders[None, :, None].expand(batch, -1, channels, -1)
+    )
+
+
+def ordered_merge(ys, inverse_orders, family_ids, direction_weights=None):
+    """Align scan outputs to image coordinates and optionally fuse direction families per pixel."""
+    batch, scans, channels, height, width = ys.shape
+    aligned = ys.flatten(3).gather(
+        -1, inverse_orders[None, :, None].expand(batch, -1, channels, -1)
+    )
+    if direction_weights is not None:
+        weights = direction_weights.flatten(2)[:, family_ids]
+        aligned = aligned * weights[:, :, None]
+    return aligned.sum(dim=1)
+
+
 # cross selective scan ===============================
 class SelectiveScanCore(torch.autograd.Function):
     # comment all checks if inside cross_selective_scan
@@ -155,7 +219,14 @@ def cross_selective_scan(
         force_fp32=False,  # False if ssoflex
         ssoflex=True,
         SelectiveScan=None,
-        scan_mode_type='default'
+        scan_mode_type='default',
+        delta_guidance: torch.Tensor = None,
+        delta_alpha: torch.Tensor = None,
+        delta_guidance_center: float = 1.0,
+        write_guidance: torch.Tensor = None,
+        write_beta: torch.Tensor = None,
+        scan_mode: str = "cross",
+        direction_weights: torch.Tensor = None,
 ):
     # out_norm: whatever fits (B, L, C); LayerNorm; Sigmoid; Softmax(dim=1);...
 
@@ -167,13 +238,45 @@ def cross_selective_scan(
     def selective_scan(u, delta, A, B, C, D=None, delta_bias=None, delta_softplus=True):
         return SelectiveScan.apply(u, delta, A, B, C, D, delta_bias, delta_softplus, nrows, backnrows, ssoflex)
 
-    xs = CrossScan.apply(x)
+    oriented_scan = scan_mode in {"oriented_hv", "oriented_hvd"}
+    if oriented_scan:
+        orders, inverse_orders, family_ids = get_scan_orders(H, W, scan_mode, x.device)
+        if orders.shape[0] != K:
+            raise ValueError(f"scan mode {scan_mode} needs K={orders.shape[0]}, but the module was built with K={K}")
+        xs = ordered_scan(x, orders)
+    else:
+        orders = inverse_orders = family_ids = None
+        xs = CrossScan.apply(x)
 
     x_dbl = torch.einsum("b k d l, k c d -> b k c l", xs, x_proj_weight)
     if x_proj_bias is not None:
         x_dbl = x_dbl + x_proj_bias.view(1, K, -1, 1)
     dts, Bs, Cs = torch.split(x_dbl, [R, N, N], dim=2)
     dts = torch.einsum("b k r l, k d r -> b k d l", dts, dt_projs_weight)
+    if delta_guidance is not None:
+        if delta_alpha is None:
+            raise ValueError("delta_alpha is required when delta_guidance is provided")
+        if delta_guidance.shape != (B, 1, H, W):
+            raise ValueError(
+                f"delta_guidance must have shape {(B, 1, H, W)}, got {tuple(delta_guidance.shape)}"
+            )
+        # Match the guidance positions to all four Cross Scan directions before
+        # broadcasting over the per-direction dt channels. The modulation is
+        # applied to the pre-softplus logits:
+        # V1 uses center=1.0: alpha * (1 - g).
+        # V2 uses center=0.5: alpha * (0.5 - g), so likely-crack
+        # locations decrease delta while likely-background locations increase it.
+        guidance_scan = (
+            ordered_scan(delta_guidance, orders) if oriented_scan else CrossScan.apply(delta_guidance)
+        ).to(dtype=dts.dtype)
+        dts = dts + delta_alpha.to(dtype=dts.dtype) * (delta_guidance_center - guidance_scan)
+    if write_guidance is not None:
+        if write_beta is None:
+            raise ValueError("write_beta is required when write_guidance is provided")
+        if write_guidance.shape != (B, 1, H, W):
+            raise ValueError(f"write_guidance must have shape {(B, 1, H, W)}, got {tuple(write_guidance.shape)}")
+        write_scan = ordered_scan(write_guidance, orders) if oriented_scan else CrossScan.apply(write_guidance)
+        Bs = Bs * (1.0 + write_beta.to(dtype=Bs.dtype) * write_scan.to(dtype=Bs.dtype))
     xs = xs.view(B, -1, L)
     dts = dts.contiguous().view(B, -1, L)
     # HiPPO matrix
@@ -193,7 +296,10 @@ def cross_selective_scan(
         xs, dts, As, Bs, Cs, Ds, delta_bias, delta_softplus
     ).view(B, K, -1, H, W)
 
-    y: torch.Tensor = CrossMerge.apply(ys)
+    if oriented_scan:
+        y = ordered_merge(ys, inverse_orders, family_ids, direction_weights)
+    else:
+        y: torch.Tensor = CrossMerge.apply(ys)
 
     if out_norm_shape in ["v1"]:  # (B, C, H, W)
         y = out_norm(y.view(B, -1, H, W)).permute(0, 2, 3, 1)  # (B, H, W, C)
