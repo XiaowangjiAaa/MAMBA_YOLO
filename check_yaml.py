@@ -157,6 +157,18 @@ AUG24_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(AUG24_EXPERIMENTS)
 
+AUG26_EXPERIMENTS = {
+    "W00": "../11/8.26-experiments/W00-yolo11-seg-baseline.yaml",
+    "W01": "../11/8.26-experiments/W01-casp-p3p4.yaml",
+    "W02": "../11/8.26-experiments/W02-casp-backbone-all.yaml",
+    "W03": "../11/8.26-experiments/W03-casp-all-c3k2.yaml",
+    "W04": "../11/8.26-experiments/W04-casp-no-transition.yaml",
+    "W05": "../11/8.26-experiments/W05-casp-no-write.yaml",
+    "W06": "../11/8.26-experiments/W06-casp-p3p4-ratio0125.yaml",
+    "W07": "../11/8.26-experiments/W07-casp-no-fusion.yaml",
+}
+ALL_EXPERIMENTS.update(AUG26_EXPERIMENTS)
+
 # ---- Colours ----
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -492,6 +504,57 @@ def test_824_structure(model, config_path):
     return True, f"corrected H/V family logits; Unified roles={actual_roles}"
 
 
+def test_826_structure(model, config_path):
+    """Verify true-YOLO11 topology, efficient partial channels and coupled CASP roles."""
+    if "8.26-experiments" not in str(config_path):
+        return True, "not an 8.26 config"
+    name = Path(config_path).name
+    names = [m.__class__.__name__ for m in model.modules()]
+    forbidden = {"SimpleStem", "VisionClueMerge", "CrackMergeDirectional", "VSSBlock"}
+    present = sorted(forbidden.intersection(names))
+    if present:
+        return False, f"8.26 must be YOLO11-based; found legacy Mamba-YOLO modules {present}"
+    adapters = [m for m in model.modules() if m.__class__.__name__ == "AdaptiveC3k2CASP"]
+    expected_count = {
+        "W00-": 0, "W01-": 2, "W02-": 4, "W03-": 8,
+        "W04-": 2, "W05-": 2, "W06-": 2, "W07-": 2,
+    }
+    key = next((prefix for prefix in expected_count if name.startswith(prefix)), None)
+    if key is None:
+        return False, f"unknown 8.26 YAML name: {name}"
+    if len(adapters) != expected_count[key]:
+        return False, f"AdaptiveC3k2CASP count={len(adapters)}, expected={expected_count[key]}"
+    if key == "W00-":
+        if names.count("C3k2") != 8:
+            return False, f"true YOLO11 baseline needs eight C3k2 modules, got {names.count('C3k2')}"
+        return True, "true YOLO11-Seg C3k2 baseline"
+    states = [m for m in model.modules() if m.__class__.__name__ == "EfficientCrackAlignedState"]
+    ss2d = [m for m in model.modules() if getattr(m, "crack_aligned_edges", False)]
+    if len(states) != len(adapters) or len(ss2d) != len(adapters):
+        return False, f"expected one efficient state core per adapter, got state={len(states)}, edgeSS2D={len(ss2d)}"
+    if any(not (0 < m.state_channels <= m.channels) for m in states):
+        return False, "invalid partial-channel allocation"
+    expected_roles = {
+        "W04-": (False, True, True),
+        "W05-": (True, False, True),
+        "W07-": (True, True, False),
+    }.get(key, (True, True, True))
+    actual_roles = {
+        (m.edge_enable_transition, m.edge_enable_write, m.edge_enable_fusion) for m in ss2d
+    }
+    if actual_roles != {expected_roles}:
+        return False, f"edge roles={actual_roles}, expected={expected_roles}"
+    if key == "W06-" and any(m.state_ratio != 0.125 for m in states):
+        return False, "W06 must use state_ratio=0.125"
+    if key != "W06-" and any(m.state_ratio != 0.25 for m in states):
+        return False, "non-W06 CASP modules must use state_ratio=0.25"
+    if any(float(model.yaml.get(k, 0.0)) != 0.0 for k in (
+        "guidance_loss_weight", "orientation_loss_weight", "gate_regularization_weight"
+    )):
+        return False, "8.26 first causal round keeps auxiliary losses disabled"
+    return True, f"adapters={len(adapters)}, partial ratios={[m.state_ratio for m in states]}, roles={expected_roles}"
+
+
 def test_live_aux_cache(model):
     """Auxiliary heads must retain the graph; detached copies are visualization-only."""
     guided = [m for m in model.modules() if hasattr(m, "structure_head") or hasattr(m, "guidance_head")]
@@ -551,6 +614,9 @@ def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
     ok, detail = test_824_structure(model, config_path)
     results.append(("8.24 corrected H/V", ok, detail or ""))
 
+    ok, detail = test_826_structure(model, config_path)
+    results.append(("8.26 YOLO11/CASP", ok, detail or ""))
+
     # 2. Deepcopy
     ok, detail = test_deepcopy(model, device)
     results.append(("deepcopy (EMA)", ok, detail or ""))
@@ -599,11 +665,17 @@ def resolve_experiments(args):
         exp_ids.update(AUG23_EXPERIMENTS.keys())
     if args.aug24:
         exp_ids.update(AUG24_EXPERIMENTS.keys())
+    if args.aug26:
+        exp_ids.update(AUG26_EXPERIMENTS.keys())
     if args.experiments:
         for e in args.experiments:
             exp_ids.add(e)
     if args.phase:
         phase_map = {
+            "26B": ["W00"],
+            "26M": ["W01", "W06"],
+            "26D": ["W02", "W03"],
+            "26A": ["W04", "W05", "W07"],
             "24F": ["U00"],
             "24H": ["U01", "U02", "U04"],
             "24R": ["U03"],
@@ -646,7 +718,8 @@ def parse_args():
     parser.add_argument("--aug19", action="store_true", help="Check the three focused 8.19 experiments")
     parser.add_argument("--aug23", action="store_true", help="Check the four focused 8.23 experiments")
     parser.add_argument("--aug24", action="store_true", help="Check the five corrected-H/V 8.24 experiments")
-    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 24F 24H 24R, 23F 23A, 19C 19G, 17A 17G, or legacy")
+    parser.add_argument("--aug26", action="store_true", help="Check the eight true-YOLO11/CASP 8.26 experiments")
+    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 26B 26M 26D 26A, 24F 24H 24R, or legacy")
     parser.add_argument("--experiments", nargs="+", default=None, help="Experiment IDs: B0 S1 C2 ...")
     parser.add_argument("--exclude", nargs="+", default=None, help="IDs to exclude")
     parser.add_argument("--list", action="store_true", help="List available experiments")

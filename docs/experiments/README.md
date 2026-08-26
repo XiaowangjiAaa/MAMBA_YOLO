@@ -9,5 +9,6 @@ Read the documents chronologically:
 5. [8.19 causal controls](8.19_CRACK_UNIFIED_CAUSAL_CONTROL_AND_OPTIMIZATION.md)
 6. [8.23 Q00 and component ablations](8.23_P5_DIRECTIONAL_UNIFIED_AND_COMPONENT_ABLATION.md)
 7. [8.24 corrected H/V mapping and stability experiments](8.24_Q00_CORRECTED_HV_AND_STABILITY_EXPERIMENTS.md)
+8. [8.26 true YOLO11 efficient crack-aligned state propagation](8.26_EFFICIENT_YOLO11_CRACK_ALIGNED_STATE_PROPAGATION.md)
 
-Current status: U00 is the completed three-seed corrected full model; U03 is the role-specific P3-Write/P4-Scan candidate awaiting a complete three-seed result.
+Current status: 8.24 established that softer H/V fusion is promising but still performs post-scan weighting. The 8.26 W-series restarts from a true YOLO11 C3k2 baseline and evaluates the unified, partial-channel CASP block.

@@ -1,4 +1,4 @@
-"""Visualize intermediate feature heatmaps from any Mamba-YOLO model YAML.
+"""Visualize intermediate feature and crack-structure maps from any supported YOLO YAML.
 
 Examples:
     python visualize_model_features.py --model path/to/model.yaml --weights path/to/best.pt --source image.jpg --list-layers
@@ -31,7 +31,7 @@ from ultralytics.data.augment import LetterBox
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visualize arbitrary intermediate features in a Mamba-YOLO model.")
+    parser = argparse.ArgumentParser(description="Visualize arbitrary intermediate features in a YOLO model.")
     parser.add_argument("--model", required=True, help="Model YAML used for training.")
     parser.add_argument("--weights", required=True, help="Trained Ultralytics checkpoint or state dict (.pt/.pth).")
     parser.add_argument("--source", help="Input image. Required unless only inspecting the layer list.")
@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-structure-maps",
         action="store_true",
-        help="Do not auto-save crack guidance and orientation maps exposed by structure-aware SSM blocks.",
+        help="Do not auto-save crack probability, orientation-family and edge-confidence maps.",
     )
     parser.add_argument("--output", default="feature_visualization", help="Output directory.")
     return parser.parse_args()
@@ -187,7 +187,7 @@ def print_and_save_layers(model: nn.Module, output_dir: Path) -> None:
 
 def auto_layer_names(model: nn.Module) -> list[str]:
     """Choose top-level feature-producing blocks without assuming one exact YAML."""
-    preferred = ("VSSBlock", "XSSBlock", "C2PSA", "SPPF", "Bottleneck", "C2f", "C3")
+    preferred = ("AdaptiveC3k2CASP", "C3k2", "VSSBlock", "XSSBlock", "C2PSA", "SPPF", "Bottleneck", "C2f", "C3")
     selected = []
     for name, module in model.named_modules():
         if is_top_level_layer(name) and any(token in type(module).__name__ for token in preferred):
@@ -351,11 +351,12 @@ def save_orientation_visual(
 def save_structure_maps(
     model: nn.Module, input_bgr: np.ndarray, output_dir: Path, overlay_alpha: float, save_npy: bool
 ) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
-    """Export the probability and direction fields cached by crack-aware SS2D modules."""
+    """Export probability, direction-family and crack-edge maps cached by SS2D."""
     panels, records = [], []
     for name, module in model.named_modules():
         guidance = getattr(module, "last_guidance", None)
         orientation = getattr(module, "last_orientation", None)
+        edge_confidence = getattr(module, "last_edge_confidence", None)
         if torch.is_tensor(guidance):
             guidance = guidance.detach().float().cpu()
             panels.append(
@@ -364,12 +365,31 @@ def save_structure_maps(
                 )
             )
             records.append({"layer": name, "kind": "crack_guidance", "shape": list(guidance.shape)})
-        if torch.is_tensor(orientation) and orientation.shape[1] == 2:
+        if torch.is_tensor(orientation) and orientation.shape[1] == 2 and getattr(module, "crack_aligned_edges", False):
+            orientation = orientation.detach().float().cpu()
+            family_probability = torch.softmax(
+                float(getattr(module, "orientation_temperature", 1.0)) * orientation, dim=1
+            )
+            for index, family in enumerate(("horizontal", "vertical")):
+                panels.append(save_feature_visuals(
+                    name, f"orientation_{family}", family_probability[:, index:index + 1],
+                    input_bgr, output_dir, "mean", 99.0, overlay_alpha, save_npy
+                ))
+            records.append({"layer": name, "kind": "orientation_hv_probability", "shape": list(orientation.shape)})
+        elif torch.is_tensor(orientation) and orientation.shape[1] == 2:
             orientation = orientation.detach().float().cpu()
             panels.append(save_orientation_visual(name, orientation, input_bgr, output_dir, overlay_alpha))
             if save_npy:
                 np.save(output_dir / f"{sanitize(name)}_orientation.npy", orientation[0].numpy())
             records.append({"layer": name, "kind": "orientation", "shape": list(orientation.shape)})
+        if torch.is_tensor(edge_confidence) and edge_confidence.shape[1] == 2:
+            edge_confidence = edge_confidence.detach().float().cpu()
+            for index, family in enumerate(("horizontal", "vertical")):
+                panels.append(save_feature_visuals(
+                    name, f"edge_{family}", edge_confidence[:, index:index + 1],
+                    input_bgr, output_dir, "mean", 99.0, overlay_alpha, save_npy
+                ))
+            records.append({"layer": name, "kind": "crack_edge_hv", "shape": list(edge_confidence.shape)})
     return panels, records
 
 

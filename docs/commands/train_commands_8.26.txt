@@ -1,0 +1,26 @@
+# 8.26 true-YOLO11 efficient CASP experiments
+
+# 1) Mandatory pre-flight. CUDA is the real numerical check.
+python check_yaml.py --aug26 --quick --device cuda:0
+
+# Shape/graph-only CPU fallback; never train with the scan stub.
+python check_yaml.py --aug26 --quick --device cpu --imgsz 128 --stub-scan
+
+# 2) First causal screen: true YOLO11 baseline, primary CASP, lighter CASP.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 26B 26M --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 3) Complete three seeds only for the retained W01/W06 candidate.
+# Replace W01 below with W06 if the lighter model gives the better accuracy-efficiency trade-off.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments W01 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 4) Unified-equation component attribution after the main model passes.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 26A --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 5) Deployment study last: all backbone stages, then all backbone+neck C3k2.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 26D --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 6) Example best-mask revalidation.
+python mbyolo_train.py --task val --weights output_dir/crack-seg-8.26/W01_crack-seg_seed0/weights/best_mask.pt --data ../crack-seg/crack-seg.yaml --device 0 --batch_size 16 --imgsz 640 --crack_metric_conf 0.25 --cldice_iters 20
+
+# 7) Visualize P3/P4 features plus probability, H/V preference and crack-edge maps.
+python visualize_model_features.py --model ultralytics/cfg/models/11/8.26-experiments/W01-casp-p3p4.yaml --weights output_dir/crack-seg-8.26/W01_crack-seg_seed0/weights/best_mask.pt --source path/to/crack.jpg --layers 4,6 --device 0 --output feature_visualization_8.26 --save-npy

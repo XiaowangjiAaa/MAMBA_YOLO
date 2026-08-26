@@ -17,6 +17,8 @@ __all__ = (
     "C1",
     "C2",
     "C3",
+    "C3k",
+    "C3k2",
     "C2f",
     "C2fAttn",
     "ImagePoolingAttn",
@@ -253,6 +255,29 @@ class C3(nn.Module):
     def forward(self, x):
         """Forward pass through the CSP bottleneck with 2 convolutions."""
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+
+
+class C3k(C3):
+    """YOLO11 C3 block with configurable internal kernel size."""
+
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, k=3):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)
+        self.m = nn.Sequential(
+            *(Bottleneck(c_, c_, shortcut, g, k=(k, k), e=1.0) for _ in range(n))
+        )
+
+
+class C3k2(C2f):
+    """Official YOLO11-style C3k2 block, backported for the legacy Mamba-YOLO fork."""
+
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(
+            C3k(self.c, self.c, 2, shortcut, g) if c3k
+            else Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0)
+            for _ in range(n)
+        )
 
 
 class C3x(C3):

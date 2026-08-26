@@ -1,4 +1,6 @@
 from .common_utils_mbyolo import *
+from .block import Bottleneck, C3k
+from .conv import Conv
 import torch.nn.functional as F
 
 __all__ = (
@@ -15,6 +17,9 @@ __all__ = (
     "CrackStructureVSSBlock",
     "UnifiedCrackAwareVSSBlock",
     "LastUnifiedCrackAwareVSSStage",
+    "EfficientCrackAlignedState",
+    "AdaptiveC3k2CASP",
+    "AdaptiveC2fCASP",
     "CrackDetailStemLite",
     "CrackDetailStemDirectional",
     "CrackMergeLite",
@@ -61,6 +66,14 @@ class SS2D(nn.Module):
             unified_enable_write=True,
             unified_enable_scan=True,
             orientation_family_logits=False,
+            crack_aligned_edges=False,
+            edge_transition_init=0.05,
+            edge_transition_max=0.5,
+            edge_write_init=0.05,
+            edge_write_max=0.25,
+            edge_enable_transition=True,
+            edge_enable_write=True,
+            edge_enable_fusion=True,
             # ======================
             forward_type="v2",
             **kwargs,
@@ -75,10 +88,14 @@ class SS2D(nn.Module):
         self.dt_rank = math.ceil(d_model / 16) if dt_rank == "auto" else dt_rank
         self.d_state = math.ceil(d_model / 6) if d_state == "auto" else d_state  # 20240109
         self.d_conv = d_conv
+        self.crack_aligned_edges = bool(crack_aligned_edges)
+        if self.crack_aligned_edges:
+            unified_crack_guidance = True
+            orientation_scan = True
         if unified_crack_guidance:
-            crack_guided_write = bool(unified_enable_write)
+            crack_guided_write = bool(unified_enable_write) and not self.crack_aligned_edges
             write_guidance_centered = bool(unified_enable_write)
-            orientation_scan = bool(unified_enable_scan)
+            orientation_scan = bool(unified_enable_scan) or self.crack_aligned_edges
         self.scan_mode = "oriented_hvd" if diagonal_scan else ("oriented_hv" if orientation_scan else "cross")
         self.K = 8 if self.scan_mode == "oriented_hvd" else 4
         self.crack_guided_delta = crack_guided_delta
@@ -91,6 +108,9 @@ class SS2D(nn.Module):
         self.nonnegative_gates = bool(nonnegative_gates)
         self.unified_enable_write = bool(unified_enable_write)
         self.unified_enable_scan = bool(unified_enable_scan)
+        self.edge_enable_transition = bool(edge_enable_transition)
+        self.edge_enable_write = bool(edge_enable_write)
+        self.edge_enable_fusion = bool(edge_enable_fusion)
         # Backward-compatible switch. Legacy oriented_hv accidentally projected the
         # two-channel head onto [+x, -x], leaving the second channel unused. New
         # experiments interpret the two channels directly as H/V family logits.
@@ -208,6 +228,21 @@ class SS2D(nn.Module):
                 self.orientation_gate = nn.Parameter(torch.tensor(gate_raw, **factory_kwargs))
                 self.orientation_gate_max = orientation_gate_max
 
+        def bounded_logit(initial, maximum, name):
+            if not 0.0 < initial < maximum:
+                raise ValueError(f"{name} must be between 0 and {maximum}")
+            ratio = initial / maximum
+            return math.log(ratio / (1.0 - ratio))
+
+        if self.crack_aligned_edges and self.edge_enable_transition:
+            raw = bounded_logit(edge_transition_init, edge_transition_max, "edge_transition_init")
+            self.edge_transition_raw = nn.Parameter(torch.tensor(raw, **factory_kwargs))
+            self.edge_transition_max = float(edge_transition_max)
+        if self.crack_aligned_edges and self.edge_enable_write:
+            raw = bounded_logit(edge_write_init, edge_write_max, "edge_write_init")
+            self.edge_write_raw = nn.Parameter(torch.tensor(raw, **factory_kwargs))
+            self.edge_write_max = float(edge_write_max)
+
         # x proj ============================
         self.x_proj = [
             nn.Linear(d_inner, (self.dt_rank + self.d_state * 2), bias=False,
@@ -312,6 +347,47 @@ class SS2D(nn.Module):
         transform = self.orientation_gate.sigmoid() if self.nonnegative_gates else self.orientation_gate.tanh()
         return self.orientation_gate_max * transform
 
+    def effective_edge_transition(self):
+        """Return the nonnegative strength for edge-conditioned state decay."""
+        if not hasattr(self, "edge_transition_raw"):
+            return None
+        return self.edge_transition_max * self.edge_transition_raw.sigmoid()
+
+    def effective_edge_write(self):
+        """Return the nonnegative strength for edge-conditioned state writing."""
+        if not hasattr(self, "edge_write_raw"):
+            return None
+        return self.edge_write_max * self.edge_write_raw.sigmoid()
+
+    @staticmethod
+    def crack_edge_confidence(probability: torch.Tensor, family_probability: torch.Tensor) -> torch.Tensor:
+        """Build symmetric H/V crack-edge confidence from one shared structure field."""
+        p_h = 0.5 * (
+            F.pad(probability[..., :, :-1], (1, 0, 0, 0), mode="replicate")
+            + F.pad(probability[..., :, 1:], (0, 1, 0, 0), mode="replicate")
+        )
+        p_v = 0.5 * (
+            F.pad(probability[..., :-1, :], (0, 0, 1, 0), mode="replicate")
+            + F.pad(probability[..., 1:, :], (0, 0, 0, 1), mode="replicate")
+        )
+        f_h = family_probability[:, :1]
+        f_v = family_probability[:, 1:2]
+        f_hn = 0.5 * (
+            F.pad(f_h[..., :, :-1], (1, 0, 0, 0), mode="replicate")
+            + F.pad(f_h[..., :, 1:], (0, 1, 0, 0), mode="replicate")
+        )
+        f_vn = 0.5 * (
+            F.pad(f_v[..., :-1, :], (0, 0, 1, 0), mode="replicate")
+            + F.pad(f_v[..., 1:, :], (0, 0, 0, 1), mode="replicate")
+        )
+        probability_pair = torch.sqrt(
+            torch.clamp(probability * torch.cat((p_h, p_v), dim=1), min=1e-6)
+        )
+        direction_pair = torch.sqrt(
+            torch.clamp(family_probability * torch.cat((f_hn, f_vn), dim=1), min=1e-6)
+        )
+        return (probability_pair * direction_pair).clamp_(0.0, 1.0)
+
     def orientation_scores(self, orientation: torch.Tensor) -> torch.Tensor:
         """Map the structure-head output to scan-family scores.
 
@@ -357,7 +433,38 @@ class SS2D(nn.Module):
             delta_alpha = self.guidance_alpha if self.crack_guided_delta else None
         write_beta = self.effective_write_gate()
 
-        if self.orientation_scan:
+        transition_guidance = None
+        transition_alpha = None
+        edge_write_guidance = None
+        edge_write_beta = None
+        if self.crack_aligned_edges:
+            direction_scores = self.orientation_scores(orientation)
+            family_probability = torch.softmax(self.orientation_temperature * direction_scores, dim=1)
+            edge_confidence = self.crack_edge_confidence(delta_guidance, family_probability)
+            self.last_edge_confidence = edge_confidence
+            self.visual_edge_confidence = edge_confidence.detach()
+            if self.edge_enable_fusion:
+                adaptive_weights = edge_confidence.shape[1] * edge_confidence / (
+                    edge_confidence.sum(dim=1, keepdim=True) + 1e-6
+                )
+                if hasattr(self, "orientation_gate"):
+                    scan_gate = self.effective_orientation_gate()
+                    direction_weights = 1.0 + scan_gate * (adaptive_weights - 1.0)
+                else:
+                    direction_weights = adaptive_weights
+            else:
+                direction_weights = None
+            if self.edge_enable_transition:
+                transition_guidance = edge_confidence
+                transition_alpha = self.effective_edge_transition()
+            if self.edge_enable_write:
+                edge_write_guidance = 2.0 * edge_confidence - 1.0
+                edge_write_beta = self.effective_edge_write()
+            self.last_orientation = orientation
+            self.visual_orientation = orientation.detach()
+        elif self.orientation_scan:
+            self.last_edge_confidence = None
+            self.visual_edge_confidence = None
             self.last_orientation = orientation
             self.visual_orientation = orientation.detach()
             direction_scores = self.orientation_scores(orientation)
@@ -374,6 +481,8 @@ class SS2D(nn.Module):
             self.last_orientation = None
             self.visual_orientation = None
             direction_weights = None
+            self.last_edge_confidence = None
+            self.visual_edge_confidence = None
         x = cross_selective_scan(
             x, self.x_proj_weight, None, self.dt_projs_weight, self.dt_projs_bias,
             self.A_logs, self.Ds,
@@ -384,10 +493,12 @@ class SS2D(nn.Module):
             delta_guidance=delta_guidance if self.crack_guided_delta else None,
             delta_alpha=delta_alpha,
             delta_guidance_center=0.5 if self.crack_delta_centered else 1.0,
-            write_guidance=(2.0 * delta_guidance - 1.0) if (
+            write_guidance=edge_write_guidance if self.crack_aligned_edges else ((2.0 * delta_guidance - 1.0) if (
                 self.crack_guided_write and self.write_guidance_centered
-            ) else (delta_guidance if self.crack_guided_write else None),
-            write_beta=write_beta,
+            ) else (delta_guidance if self.crack_guided_write else None)),
+            write_beta=edge_write_beta if self.crack_aligned_edges else write_beta,
+            transition_guidance=transition_guidance,
+            transition_alpha=transition_alpha,
             scan_mode=self.scan_mode,
             direction_weights=direction_weights,
         )
@@ -867,6 +978,159 @@ class LastUnifiedCrackAwareVSSStage(nn.Sequential):
                 block = VSSBlock(input_dim, hidden_dim, **kwargs)
             blocks.append(block)
         super().__init__(*blocks)
+
+
+class EfficientCrackAlignedState(nn.Module):
+    """Partial-channel crack-aligned SSM with a bounded residual router.
+
+    One shared crack edge controls directional fusion, state decay and state
+    writing inside SS2D. Only ``state_ratio`` channels enter the SSM, keeping
+    the block practical at high-resolution YOLO stages.
+    """
+
+    def __init__(self, channels, state_ratio=0.25, route_init=0.01, route_max=0.5,
+                 d_state=8, ssm_ratio=1.0, edge_transition_init=0.05,
+                 edge_transition_max=0.5, edge_write_init=0.05,
+                 edge_write_max=0.25, scan_gate_init=0.05, scan_gate_max=0.5,
+                 orientation_temperature=1.0, enable_transition=True,
+                 enable_write=True, enable_fusion=True):
+        super().__init__()
+        self.channels = int(channels)
+        self.state_ratio = float(state_ratio)
+        state_channels = max(8, int(round(channels * state_ratio / 8.0)) * 8)
+        self.state_channels = min(channels, state_channels)
+        if not 0.0 < route_init < route_max:
+            raise ValueError("route_init must be between 0 and route_max")
+        route_ratio = route_init / route_max
+        self.route_raw = nn.Parameter(torch.tensor(math.log(route_ratio / (1.0 - route_ratio))))
+        self.route_max = float(route_max)
+        self.norm = LayerNorm2d(self.state_channels)
+        self.state = SS2D(
+            d_model=self.state_channels,
+            d_state=d_state,
+            ssm_ratio=ssm_ratio,
+            ssm_rank_ratio=ssm_ratio,
+            d_conv=3,
+            dropout=0.0,
+            orientation_scan=True,
+            orientation_gate_init=scan_gate_init,
+            orientation_gate_max=scan_gate_max,
+            orientation_temperature=orientation_temperature,
+            orientation_family_logits=True,
+            nonnegative_gates=True,
+            crack_aligned_edges=True,
+            edge_transition_init=edge_transition_init,
+            edge_transition_max=edge_transition_max,
+            edge_write_init=edge_write_init,
+            edge_write_max=edge_write_max,
+            edge_enable_transition=enable_transition,
+            edge_enable_write=enable_write,
+            edge_enable_fusion=enable_fusion,
+            forward_type="v2noz",
+        )
+
+    def effective_route(self):
+        return self.route_max * self.route_raw.sigmoid()
+
+    def forward(self, x):
+        state_input = x[:, :self.state_channels]
+        state_delta = self.state(self.norm(state_input))
+        # The structure probability supplies sample/spatial adaptation, while
+        # the bounded scalar lets each YOLO stage learn how much SSM it needs.
+        probability = self.state.last_guidance
+        spatial_route = 0.5 + probability
+        updated = state_input + self.effective_route() * spatial_route * state_delta
+        return torch.cat((updated, x[:, self.state_channels:]), dim=1)
+
+
+class _AdaptiveCASPUnit(nn.Module):
+    """Local YOLO bottleneck followed by an efficient residual CASP branch."""
+
+    def __init__(self, channels, c3k=False, shortcut=True, state_ratio=0.25, route_init=0.01,
+                 route_max=0.5, d_state=8, ssm_ratio=1.0,
+                 edge_transition_init=0.05, edge_transition_max=0.5,
+                 edge_write_init=0.05, edge_write_max=0.25,
+                 scan_gate_init=0.05, scan_gate_max=0.5,
+                 orientation_temperature=1.0, enable_transition=True,
+                 enable_write=True, enable_fusion=True):
+        super().__init__()
+        self.local = C3k(channels, channels, 2, shortcut) if c3k else Bottleneck(
+            channels, channels, shortcut, 1, k=((3, 3), (3, 3)), e=1.0
+        )
+        self.casp = EfficientCrackAlignedState(
+            channels, state_ratio, route_init, route_max, d_state, ssm_ratio,
+            edge_transition_init, edge_transition_max, edge_write_init,
+            edge_write_max, scan_gate_init, scan_gate_max,
+            orientation_temperature, enable_transition, enable_write, enable_fusion
+        )
+
+    def forward(self, x):
+        return self.casp(self.local(x))
+
+
+class AdaptiveC3k2CASP(nn.Module):
+    """Drop-in, efficient YOLO11 C3k2 replacement with one adaptive CASP unit.
+
+    The CSP topology and local operations remain available at every stage. Only
+    the last internal repeat contains a partial-channel state branch, so the same
+    module can be deployed throughout the backbone and neck without forcing
+    shallow features to rely on global propagation.
+    """
+
+    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, state_ratio=0.25,
+                 route_init=0.01, route_max=0.5, d_state=8, ssm_ratio=1.0,
+                 edge_transition_init=0.05, edge_transition_max=0.5,
+                 edge_write_init=0.05, edge_write_max=0.25,
+                 scan_gate_init=0.05, scan_gate_max=0.5,
+                 orientation_temperature=1.0, enable_transition=True,
+                 enable_write=True, enable_fusion=True, shortcut=True):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)
+        units = []
+        for index in range(n):
+            if index == n - 1:
+                unit = _AdaptiveCASPUnit(
+                    self.c, c3k, shortcut, state_ratio, route_init, route_max, d_state,
+                    ssm_ratio, edge_transition_init, edge_transition_max,
+                    edge_write_init, edge_write_max, scan_gate_init,
+                    scan_gate_max, orientation_temperature, enable_transition,
+                    enable_write, enable_fusion
+                )
+            else:
+                unit = C3k(self.c, self.c, 2, shortcut) if c3k else Bottleneck(
+                    self.c, self.c, shortcut, 1, k=((3, 3), (3, 3)), e=1.0
+                )
+            units.append(unit)
+        self.m = nn.ModuleList(units)
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(module(y[-1]) for module in self.m)
+        return self.cv2(torch.cat(y, dim=1))
+
+
+class AdaptiveC2fCASP(AdaptiveC3k2CASP):
+    """YOLOv8 C2f-compatible wrapper around the same efficient CASP core."""
+
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5,
+                 state_ratio=0.25, route_init=0.01, route_max=0.5,
+                 d_state=8, ssm_ratio=1.0, edge_transition_init=0.05,
+                 edge_transition_max=0.5, edge_write_init=0.05,
+                 edge_write_max=0.25, scan_gate_init=0.05,
+                 scan_gate_max=0.5, orientation_temperature=1.0,
+                 enable_transition=True, enable_write=True, enable_fusion=True):
+        # g is accepted for a C2f-compatible YAML signature; the current local
+        # bottleneck remains group=1 to keep the CASP wrapper lightweight.
+        del g
+        super().__init__(
+            c1, c2, n, False, e, state_ratio, route_init, route_max, d_state,
+            ssm_ratio, edge_transition_init, edge_transition_max,
+            edge_write_init, edge_write_max, scan_gate_init, scan_gate_max,
+            orientation_temperature, enable_transition, enable_write,
+            enable_fusion, shortcut
+        )
 
 
 class SimpleStem(nn.Module):

@@ -12,6 +12,8 @@ from ultralytics.nn.modules import (
     C1,
     C2,
     C3,
+    C3k,
+    C3k2,
     C3TR,
     OBB,
     SPP,
@@ -68,6 +70,9 @@ from ultralytics.nn.modules import (
     CrackStructureVSSBlock,
     UnifiedCrackAwareVSSBlock,
     LastUnifiedCrackAwareVSSStage,
+    EfficientCrackAlignedState,
+    AdaptiveC3k2CASP,
+    AdaptiveC2fCASP,
     CrackDetailStemLite,
     CrackDetailStemDirectional,
     CrackMergeLite,
@@ -908,6 +913,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C1,
             C2,
             C2f,
+            C3k,
+            C3k2,
             RepNCSPELAN4,
             ADown,
             SPPELAN,
@@ -925,7 +932,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             CenteredCrackWriteVSSBlock, LastCrackWriteVSSStage, LastCenteredCrackWriteVSSStage,
             CrackMemoryVSSBlock, CrackStructureVSSBlock,
             UnifiedCrackAwareVSSBlock, CrackDetailStemLite, CrackDetailStemDirectional,
-            LastUnifiedCrackAwareVSSStage, CrackMergeLite, CrackMergeDirectional
+            LastUnifiedCrackAwareVSSStage, EfficientCrackAlignedState, AdaptiveC3k2CASP, AdaptiveC2fCASP,
+            CrackMergeLite, CrackMergeDirectional
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -938,7 +946,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
             args = [c1, c2, *args[1:]]
             if m in {
-                BottleneckCSP, C1, C2, C2f, C2fAttn, C3, C3TR, C3Ghost, C3x, RepC3, XSSBlock,
+                BottleneckCSP, C1, C2, C2f, C3k, C3k2, AdaptiveC3k2CASP, AdaptiveC2fCASP,
+                C2fAttn, C3, C3TR, C3Ghost, C3x, RepC3, XSSBlock,
                 CrackXSSBlock, CrackXSSBlockV2, LastCrackWriteVSSStage, LastCenteredCrackWriteVSSStage,
                 LastUnifiedCrackAwareVSSStage
             }:

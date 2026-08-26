@@ -297,6 +297,19 @@ AUG24_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(AUG24_EXPERIMENTS)
 
+# 2026-08-26: true YOLO11-Seg topology and the efficient, edge-coupled CASP block.
+AUG26_EXPERIMENTS = {
+    "W00": {"config": "../11/8.26-experiments/W00-yolo11-seg-baseline.yaml", "desc": "True YOLO11-Seg C3k2 baseline", "phase": "26B"},
+    "W01": {"config": "../11/8.26-experiments/W01-casp-p3p4.yaml", "desc": "Primary efficient CASP at backbone P3/P4", "phase": "26M"},
+    "W02": {"config": "../11/8.26-experiments/W02-casp-backbone-all.yaml", "desc": "Adaptive CASP at every backbone C3k2", "phase": "26D"},
+    "W03": {"config": "../11/8.26-experiments/W03-casp-all-c3k2.yaml", "desc": "Universality: replace every backbone/neck C3k2", "phase": "26D"},
+    "W04": {"config": "../11/8.26-experiments/W04-casp-no-transition.yaml", "desc": "Ablation: no edge-conditioned memory decay", "phase": "26A"},
+    "W05": {"config": "../11/8.26-experiments/W05-casp-no-write.yaml", "desc": "Ablation: no edge-conditioned state writing", "phase": "26A"},
+    "W06": {"config": "../11/8.26-experiments/W06-casp-p3p4-ratio0125.yaml", "desc": "Efficiency: P3/P4 with 0.125 state ratio", "phase": "26M"},
+    "W07": {"config": "../11/8.26-experiments/W07-casp-no-fusion.yaml", "desc": "Ablation: uniform merge while edge still controls memory", "phase": "26A"},
+}
+ALL_EXPERIMENTS.update(AUG26_EXPERIMENTS)
+
 
 def load_status():
     if STATUS_FILE.exists():
@@ -339,7 +352,9 @@ def build_cmd(exp_name, exp_info, args):
         print(f"  [WARN] Config not found: {config_path}")
         return None
 
-    if exp_name in AUG24_EXPERIMENTS:
+    if exp_name in AUG26_EXPERIMENTS:
+        default_project = f"./output_dir/{args.data_stem}-8.26"
+    elif exp_name in AUG24_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.24"
     elif exp_name in AUG23_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.23"
@@ -577,6 +592,9 @@ Usage examples:
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 23F --seeds 0
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 23A --seeds 0
 
+  # 8.26: true YOLO11 baseline, primary method and efficiency control
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 26B 26M --seeds 0
+
   # 8.24: corrected Q00 first, then seed-0 stability controls
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24F --seeds 0 1 2
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24H 24R --seeds 0
@@ -594,7 +612,7 @@ Usage examples:
     exp_group.add_argument("--experiments", nargs="+", default=None,
                            help="Specific experiment IDs to run (e.g. B0 S1 S2)")
     exp_group.add_argument("--phase", nargs="+", default=None,
-                           help="Run phases 24F/24H/24R, 23F/23A, 19C/19G, 17A/17G, 12S/12M/12U, or legacy phases")
+                           help="Run phases 26B/26M/26D/26A, 24F/24H/24R, or legacy phases")
     exp_group.add_argument("--exclude", nargs="+", default=None,
                            help="Experiment IDs to exclude")
 
@@ -602,7 +620,7 @@ Usage examples:
     parser.add_argument("--list", action="store_true",
                         help="List all available experiments and exit")
     parser.add_argument("--list-group", default=None,
-                        help="Filter list by phase (24F, 24H, 24R, 23F, 23A, 19C, 19G, 17A, 17G, 12S, 12M, 12U, legacy)")
+                        help="Filter list by phase (26B, 26M, 26D, 26A, 24F, 24H, 24R, or legacy)")
 
     # Data & training params
     train_group = parser.add_argument_group("Training configuration")
@@ -668,19 +686,20 @@ def resolve_experiments(args):
                 if str(info["phase"]) == p:
                     exp_ids.add(eid)
     if not exp_ids and not args.list:
-        # Default: run the focused 8.24 correction set. Older experiments remain addressable by ID/phase.
+        # Default: run the true-YOLO11 8.26 set. Older experiments remain addressable by ID/phase.
         use_all = True
-        exp_ids = set(AUG24_EXPERIMENTS.keys())
+        exp_ids = set(AUG26_EXPERIMENTS.keys())
 
     if args.exclude:
         for e in args.exclude:
             exp_ids.discard(e)
 
     # Sort by phase then by name for a sensible order
-    phase_order = {"24F": 0, "24H": 1, "24R": 2, "23F": 3, "23A": 4,
-                   "19C": 5, "19G": 6, "17A": 7, "17G": 8, "12S": 9,
-                   "12M": 10, "12U": 11, "A": 12, "B": 13, "C": 14,
-                   "1": 15, "2": 16, "3": 17, "4": 18, "dv2": 19, "v8": 20}
+    phase_order = {"26B": 0, "26M": 1, "26D": 2, "26A": 3,
+                   "24F": 4, "24H": 5, "24R": 6, "23F": 7, "23A": 8,
+                   "19C": 9, "19G": 10, "17A": 11, "17G": 12, "12S": 13,
+                   "12M": 14, "12U": 15, "A": 16, "B": 17, "C": 18,
+                   "1": 19, "2": 20, "3": 21, "4": 22, "dv2": 23, "v8": 24}
     sorted_ids = sorted(
         exp_ids,
         key=lambda x: (phase_order.get(str(ALL_EXPERIMENTS[x]["phase"]), 99), x),

@@ -21,6 +21,8 @@ from .block import (
     C1,
     C2,
     C3,
+    C3k,
+    C3k2,
     C3TR,
     C2PSA,
     DFL,
@@ -84,6 +86,9 @@ from .mamba_yolo import (
     CrackStructureVSSBlock,
     UnifiedCrackAwareVSSBlock,
     LastUnifiedCrackAwareVSSStage,
+    EfficientCrackAlignedState,
+    AdaptiveC3k2CASP,
+    AdaptiveC2fCASP,
     CrackDetailStemLite,
     CrackDetailStemDirectional,
     CrackMergeLite,
@@ -128,6 +133,8 @@ __all__ = (
     "C1",
     "C2",
     "C3",
+    "C3k",
+    "C3k2",
     "C2f",
     "C2fAttn",
     "C3x",
@@ -170,5 +177,6 @@ __all__ = (
     "CenteredCrackWriteVSSBlock", "LastCrackWriteVSSStage", "LastCenteredCrackWriteVSSStage",
     "CrackMemoryVSSBlock", "CrackStructureVSSBlock",
     "UnifiedCrackAwareVSSBlock", "CrackDetailStemLite", "CrackDetailStemDirectional",
-    "LastUnifiedCrackAwareVSSStage", "CrackMergeLite", "CrackMergeDirectional"
+    "LastUnifiedCrackAwareVSSStage", "EfficientCrackAlignedState", "AdaptiveC3k2CASP", "AdaptiveC2fCASP",
+    "CrackMergeLite", "CrackMergeDirectional"
 )

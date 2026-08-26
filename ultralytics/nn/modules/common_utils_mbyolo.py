@@ -225,6 +225,8 @@ def cross_selective_scan(
         delta_guidance_center: float = 1.0,
         write_guidance: torch.Tensor = None,
         write_beta: torch.Tensor = None,
+        transition_guidance: torch.Tensor = None,
+        transition_alpha: torch.Tensor = None,
         scan_mode: str = "cross",
         direction_weights: torch.Tensor = None,
 ):
@@ -248,6 +250,25 @@ def cross_selective_scan(
         orders = inverse_orders = family_ids = None
         xs = CrossScan.apply(x)
 
+    def guidance_scan(guidance, name):
+        """Align scalar or scan-family guidance with every directional sequence."""
+        if guidance is None:
+            return None
+        if guidance.ndim != 4 or guidance.shape[0] != B or guidance.shape[2:] != (H, W):
+            raise ValueError(
+                f"{name} must have shape (B, C, H, W) with B/H/W={(B, H, W)}, got {tuple(guidance.shape)}"
+            )
+        if guidance.shape[1] == 1:
+            return ordered_scan(guidance, orders) if oriented_scan else CrossScan.apply(guidance)
+        if not oriented_scan:
+            raise ValueError(f"multi-family {name} requires an oriented scan mode")
+        family_count = int(family_ids.max().item()) + 1
+        if guidance.shape[1] != family_count:
+            raise ValueError(f"{name} needs {family_count} scan-family channels, got {guidance.shape[1]}")
+        selected = guidance[:, family_ids].flatten(2)
+        selected = selected.gather(-1, orders[None].expand(B, -1, -1))
+        return selected[:, :, None]
+
     x_dbl = torch.einsum("b k d l, k c d -> b k c l", xs, x_proj_weight)
     if x_proj_bias is not None:
         x_dbl = x_dbl + x_proj_bias.view(1, K, -1, 1)
@@ -266,16 +287,19 @@ def cross_selective_scan(
         # V1 uses center=1.0: alpha * (1 - g).
         # V2 uses center=0.5: alpha * (0.5 - g), so likely-crack
         # locations decrease delta while likely-background locations increase it.
-        guidance_scan = (
-            ordered_scan(delta_guidance, orders) if oriented_scan else CrossScan.apply(delta_guidance)
-        ).to(dtype=dts.dtype)
-        dts = dts + delta_alpha.to(dtype=dts.dtype) * (delta_guidance_center - guidance_scan)
+        delta_scan = guidance_scan(delta_guidance, "delta_guidance").to(dtype=dts.dtype)
+        dts = dts + delta_alpha.to(dtype=dts.dtype) * (delta_guidance_center - delta_scan)
+    if transition_guidance is not None:
+        if transition_alpha is None:
+            raise ValueError("transition_alpha is required when transition_guidance is provided")
+        edge_scan = guidance_scan(transition_guidance, "transition_guidance").to(dtype=dts.dtype)
+        # Low crack-edge confidence increases the positive delta logit, causing
+        # faster decay before irrelevant background state can cross the edge.
+        dts = dts + transition_alpha.to(dtype=dts.dtype) * (1.0 - edge_scan)
     if write_guidance is not None:
         if write_beta is None:
             raise ValueError("write_beta is required when write_guidance is provided")
-        if write_guidance.shape != (B, 1, H, W):
-            raise ValueError(f"write_guidance must have shape {(B, 1, H, W)}, got {tuple(write_guidance.shape)}")
-        write_scan = ordered_scan(write_guidance, orders) if oriented_scan else CrossScan.apply(write_guidance)
+        write_scan = guidance_scan(write_guidance, "write_guidance")
         Bs = Bs * (1.0 + write_beta.to(dtype=Bs.dtype) * write_scan.to(dtype=Bs.dtype))
     xs = xs.view(B, -1, L)
     dts = dts.contiguous().view(B, -1, L)
