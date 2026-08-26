@@ -212,7 +212,14 @@ class SS2D(nn.Module):
                 [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]], **factory_kwargs
             )
             self.register_buffer("orientation_basis", basis, persistent=False)
-            if orientation_gate_init is not None:
+            # A disabled fusion branch must not leave behind a trainable gate.
+            # Such a parameter is harmless in a single-process forward check but
+            # is unused by autograd and therefore breaks DDP training when
+            # find_unused_parameters=False (the W07 ablation).
+            create_orientation_gate = orientation_gate_init is not None and (
+                not self.crack_aligned_edges or self.edge_enable_fusion
+            )
+            if create_orientation_gate:
                 if self.nonnegative_gates:
                     if not 0.0 < orientation_gate_init < orientation_gate_max:
                         raise ValueError(
@@ -1013,7 +1020,7 @@ class EfficientCrackAlignedState(nn.Module):
             d_conv=3,
             dropout=0.0,
             orientation_scan=True,
-            orientation_gate_init=scan_gate_init,
+            orientation_gate_init=scan_gate_init if enable_fusion else None,
             orientation_gate_max=scan_gate_max,
             orientation_temperature=orientation_temperature,
             orientation_family_logits=True,

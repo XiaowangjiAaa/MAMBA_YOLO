@@ -230,7 +230,7 @@ def test_deepcopy(model, device):
 
 
 def test_forward(model, device, nc=1, imgsz=640):
-    """Test forward pass in train and eval mode."""
+    """Test forward pass in train and eval mode and retain the train graph for checks."""
     model = model.to(device)
     batch = torch.randn(2, 3, imgsz, imgsz, device=device)
 
@@ -240,7 +240,7 @@ def test_forward(model, device, nc=1, imgsz=640):
         with torch.no_grad():
             _ = model(batch)
     except Exception as e:
-        return False, f"inference forward: {e}"
+        return False, f"inference forward: {e}", None
 
     # Train mode
     model.train()
@@ -254,9 +254,9 @@ def test_forward(model, device, nc=1, imgsz=640):
                 # (feats, pred_masks, proto) - seg model train output
                 pass
     except Exception as e:
-        return False, f"train forward: {e}"
+        return False, f"train forward: {e}", None
 
-    return True, None
+    return True, None, out
 
 
 def test_amp_forward(model, device):
@@ -544,6 +544,23 @@ def test_826_structure(model, config_path):
     }
     if actual_roles != {expected_roles}:
         return False, f"edge roles={actual_roles}, expected={expected_roles}"
+    # Disabled branches must not register trainable scalar gates. A normal
+    # forward pass cannot detect these, but DDP will fail on the next iteration
+    # because the parameters never receive gradients.
+    stale_parameters = []
+    for index, module in enumerate(ss2d):
+        disabled_gates = (
+            ("transition", "edge_transition_raw", module.edge_enable_transition),
+            ("write", "edge_write_raw", module.edge_enable_write),
+            ("fusion", "orientation_gate", module.edge_enable_fusion),
+        )
+        for role, parameter, enabled in disabled_gates:
+            if enabled != hasattr(module, parameter):
+                stale_parameters.append(
+                    f"SS2D[{index}] {role}: enabled={enabled}, parameter={hasattr(module, parameter)}"
+                )
+    if stale_parameters:
+        return False, "role/parameter mismatch (DDP unused-parameter risk): " + "; ".join(stale_parameters)
     if key == "W06-" and any(m.state_ratio != 0.125 for m in states):
         return False, "W06 must use state_ratio=0.125"
     if key != "W06-" and any(m.state_ratio != 0.25 for m in states):
@@ -581,6 +598,49 @@ def test_live_aux_cache(model):
     if not any(g is not None and torch.isfinite(g).all() and g.abs().sum() > 0 for g in grads):
         return False, "auxiliary cache is attached but no guidance-head gradient was produced"
     return True, f"{len(guided)} live graph(s); gradient reaches guidance head(s)"
+
+
+def test_826_gradient_reachability(model, config_path, output):
+    """Detect trainable CASP parameters that forward-only YAML checks miss.
+
+    DDP with ``find_unused_parameters=False`` fails when a registered parameter
+    does not reach the loss graph. This specifically guards component-ablation
+    YAMLs such as W07, where a disabled role must also remove its scalar gate.
+    """
+    if "8.26-experiments" not in str(config_path) or output is None:
+        return True, "not an 8.26 config"
+
+    def tensors(value):
+        if torch.is_tensor(value):
+            return [value]
+        if isinstance(value, dict):
+            return [item for child in value.values() for item in tensors(child)]
+        if isinstance(value, (list, tuple)):
+            return [item for child in value for item in tensors(child)]
+        return []
+
+    output_tensors = [item for item in tensors(output) if item.requires_grad and item.is_floating_point()]
+    if not output_tensors:
+        return False, "training output has no differentiable tensors"
+    states = [m for m in model.modules() if m.__class__.__name__ == "EfficientCrackAlignedState"]
+    named_parameters = [
+        (f"state[{index}].{name}", parameter)
+        for index, state in enumerate(states)
+        for name, parameter in state.named_parameters()
+        if parameter.requires_grad
+    ]
+    if not named_parameters:
+        return True, "baseline has no CASP parameters"
+    scalar = sum(item.float().mean() for item in output_tensors)
+    gradients = torch.autograd.grad(
+        scalar, [parameter for _, parameter in named_parameters], retain_graph=True, allow_unused=True
+    )
+    unused = [name for (name, _), gradient in zip(named_parameters, gradients) if gradient is None]
+    if unused:
+        preview = ", ".join(unused[:8])
+        suffix = f" (+{len(unused) - 8} more)" if len(unused) > 8 else ""
+        return False, f"DDP-unused CASP parameter(s): {preview}{suffix}"
+    return True, f"all {len(named_parameters)} CASP parameter tensors reach the training graph"
 
 
 def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
@@ -622,11 +682,13 @@ def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
     results.append(("deepcopy (EMA)", ok, detail or ""))
 
     # 3. Forward pass
-    ok, detail = test_forward(model, device, nc=nc, imgsz=imgsz)
+    ok, detail, train_output = test_forward(model, device, nc=nc, imgsz=imgsz)
     results.append(("forward", ok, detail or ""))
     if ok:
         cache_ok, cache_detail = test_live_aux_cache(model)
         results.append(("aux graph attached", cache_ok, cache_detail or ""))
+        reach_ok, reach_detail = test_826_gradient_reachability(model, config_path, train_output)
+        results.append(("8.26 gradient reach", reach_ok, reach_detail or ""))
 
     # 4. AMP forward
     if device.type == 'cuda':
