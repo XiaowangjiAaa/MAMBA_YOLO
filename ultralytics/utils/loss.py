@@ -276,7 +276,14 @@ class v8SegmentationLoss(v8DetectionLoss):
 
     @staticmethod
     def _probability_guidance_loss(guidance, target, dice_weight):
-        target = F.interpolate(target[:, None], guidance.shape[-2:], mode="nearest")
+        target = target[:, None]
+        if target.shape[-2:] != guidance.shape[-2:]:
+            # Max pooling preserves one-pixel crack evidence that nearest-neighbor
+            # downsampling can erase at P3/P4.
+            if target.shape[-2] >= guidance.shape[-2] and target.shape[-1] >= guidance.shape[-1]:
+                target = F.adaptive_max_pool2d(target, guidance.shape[-2:])
+            else:
+                target = F.interpolate(target, guidance.shape[-2:], mode="nearest")
         with torch.cuda.amp.autocast(enabled=False):
             probability = guidance.float().clamp(1e-5, 1.0 - 1e-5)
             bce = F.binary_cross_entropy(probability, target)
@@ -286,8 +293,8 @@ class v8SegmentationLoss(v8DetectionLoss):
         return bce + dice_weight * dice
 
     @staticmethod
-    def _orientation_guidance_loss(orientation, target):
-        """Supervise undirected boundary tangents as (cos(2 theta), sin(2 theta))."""
+    def _orientation_guidance_loss(orientation, target, family_logits=False):
+        """Supervise either H/V family logits or legacy double-angle tangents."""
         with torch.cuda.amp.autocast(enabled=False):
             target = F.interpolate(target[:, None], orientation.shape[-2:], mode="bilinear", align_corners=False)
             sobel_x = target.new_tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]).view(1, 1, 3, 3)
@@ -297,6 +304,15 @@ class v8SegmentationLoss(v8DetectionLoss):
             magnitude_sq = grad_x.square() + grad_y.square()
             valid = magnitude_sq > 1e-4
             denominator = magnitude_sq.clamp_min(1e-6)
+            if family_logits:
+                # Mask gradients are normal to the crack. A large vertical
+                # gradient therefore indicates a horizontal tangent and vice versa.
+                target_family = torch.cat((grad_y.square(), grad_x.square()), dim=1) / denominator
+                log_probability = F.log_softmax(orientation.float(), dim=1)
+                difference = -(target_family * log_probability).sum(dim=1, keepdim=True)
+                if valid.any():
+                    return difference[valid].mean()
+                return orientation.sum() * 0.0
             target_orientation = torch.cat(
                 ((grad_y.square() - grad_x.square()) / denominator, -2.0 * grad_x * grad_y / denominator), dim=1
             )
@@ -333,7 +349,11 @@ class v8SegmentationLoss(v8DetectionLoss):
                     self._probability_guidance_loss(guidance, target, self.guidance_dice_weight)
                 )
             if orientation is not None and self.orientation_loss_weight > 0.0:
-                orientation_losses.append(self._orientation_guidance_loss(orientation, target))
+                orientation_losses.append(
+                    self._orientation_guidance_loss(
+                        orientation, target, family_logits=getattr(module, "orientation_family_logits", False)
+                    )
+                )
         if probability_losses:
             auxiliary = auxiliary + self.guidance_loss_weight * torch.stack(probability_losses).mean()
         if orientation_losses:

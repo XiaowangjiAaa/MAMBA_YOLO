@@ -1,0 +1,29 @@
+# 8.27 Mask-mAP50-driven full-CASP parameter optimization
+
+# 1) Validate all YAML structures and CASP gradient reachability.
+python check_yaml.py --aug27 --quick --device cuda:0
+
+# CPU shape/graph fallback only; never train with --stub-scan.
+python check_yaml.py --aug27 --quick --device cpu --imgsz 128 --stub-scan
+
+# 2) Mandatory baseline and full-CASP reference.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27B 27F --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+# 3) Probability-guidance strength.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27G --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# 4) Orientation supervision, residual route and direction reliability.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27O 27R 27D --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# 5) State capacity and stage-specific parameterization last.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27C --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# 6) Example three-seed confirmation. Replace X01 with the top two seed0 candidates.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments X00 X01 --seeds 1 2 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# 7) Primary checkpoint revalidation.
+python mbyolo_train.py --task val --weights output_dir/crack-seg-8.27/X01_crack-seg_seed0/weights/best_map50.pt --data ../crack-seg/crack-seg.yaml --device 0 --batch_size 16 --imgsz 640 --crack_metric_conf 0.25 --cldice_iters 20
+
+# 8) Visualize P3/P4 features, probability, H/V family and edge confidence.
+python visualize_model_features.py --model ultralytics/cfg/models/11/8.27-experiments/X01-casp-reference.yaml --weights output_dir/crack-seg-8.27/X01_crack-seg_seed0/weights/best_map50.pt --source path/to/crack.jpg --layers 4,6 --device 0 --output feature_visualization_8.27 --save-npy
+

@@ -74,6 +74,9 @@ class SS2D(nn.Module):
             edge_enable_transition=True,
             edge_enable_write=True,
             edge_enable_fusion=True,
+            structure_kernel=1,
+            structure_init_std=0.0,
+            direction_mix=1.0,
             # ======================
             forward_type="v2",
             **kwargs,
@@ -111,6 +114,15 @@ class SS2D(nn.Module):
         self.edge_enable_transition = bool(edge_enable_transition)
         self.edge_enable_write = bool(edge_enable_write)
         self.edge_enable_fusion = bool(edge_enable_fusion)
+        self.structure_kernel = int(structure_kernel)
+        self.structure_init_std = float(structure_init_std)
+        self.direction_mix = float(direction_mix)
+        if self.structure_kernel not in {1, 3, 5} or self.structure_kernel % 2 == 0:
+            raise ValueError("structure_kernel must be one of {1, 3, 5}")
+        if self.structure_init_std < 0.0:
+            raise ValueError("structure_init_std must be nonnegative")
+        if not 0.0 <= self.direction_mix <= 1.0:
+            raise ValueError("direction_mix must be between 0 and 1")
         # Backward-compatible switch. Legacy oriented_hv accidentally projected the
         # two-channel head onto [+x, -x], leaving the second channel unused. New
         # experiments interpret the two channels directly as H/V family logits.
@@ -167,9 +179,24 @@ class SS2D(nn.Module):
             # The head is zero-initialized, so preserve the RNG stream as well: with the
             # same seed, all following baseline SS2D parameters retain paired initialization.
             rng_state = torch.get_rng_state()
-            self.structure_head = nn.Conv2d(d_inner, 3, kernel_size=1, bias=True, **factory_kwargs)
-            nn.init.zeros_(self.structure_head.weight)
-            nn.init.zeros_(self.structure_head.bias)
+            if self.structure_kernel == 1:
+                self.structure_head = nn.Conv2d(d_inner, 3, kernel_size=1, bias=True, **factory_kwargs)
+                output_head = self.structure_head
+            else:
+                self.structure_head = nn.Sequential(
+                    nn.Conv2d(
+                        d_inner, d_inner, kernel_size=self.structure_kernel,
+                        padding=self.structure_kernel // 2, groups=d_inner, bias=False, **factory_kwargs
+                    ),
+                    nn.GELU(),
+                    nn.Conv2d(d_inner, 3, kernel_size=1, bias=True, **factory_kwargs),
+                )
+                output_head = self.structure_head[-1]
+            if self.structure_init_std > 0.0:
+                nn.init.normal_(output_head.weight, mean=0.0, std=self.structure_init_std)
+            else:
+                nn.init.zeros_(output_head.weight)
+            nn.init.zeros_(output_head.bias)
             torch.set_rng_state(rng_state)
         elif self.crack_guided_delta or self.crack_guided_write:
             self.guidance = nn.Sequential(
@@ -233,6 +260,7 @@ class SS2D(nn.Module):
                     gate_ratio = orientation_gate_init / orientation_gate_max
                     gate_raw = math.atanh(gate_ratio)
                 self.orientation_gate = nn.Parameter(torch.tensor(gate_raw, **factory_kwargs))
+                self.orientation_gate._no_weight_decay = True
                 self.orientation_gate_max = orientation_gate_max
 
         def bounded_logit(initial, maximum, name):
@@ -244,10 +272,12 @@ class SS2D(nn.Module):
         if self.crack_aligned_edges and self.edge_enable_transition:
             raw = bounded_logit(edge_transition_init, edge_transition_max, "edge_transition_init")
             self.edge_transition_raw = nn.Parameter(torch.tensor(raw, **factory_kwargs))
+            self.edge_transition_raw._no_weight_decay = True
             self.edge_transition_max = float(edge_transition_max)
         if self.crack_aligned_edges and self.edge_enable_write:
             raw = bounded_logit(edge_write_init, edge_write_max, "edge_write_init")
             self.edge_write_raw = nn.Parameter(torch.tensor(raw, **factory_kwargs))
+            self.edge_write_raw._no_weight_decay = True
             self.edge_write_max = float(edge_write_max)
 
         # x proj ============================
@@ -366,8 +396,7 @@ class SS2D(nn.Module):
             return None
         return self.edge_write_max * self.edge_write_raw.sigmoid()
 
-    @staticmethod
-    def crack_edge_confidence(probability: torch.Tensor, family_probability: torch.Tensor) -> torch.Tensor:
+    def crack_edge_confidence(self, probability: torch.Tensor, family_probability: torch.Tensor) -> torch.Tensor:
         """Build symmetric H/V crack-edge confidence from one shared structure field."""
         p_h = 0.5 * (
             F.pad(probability[..., :, :-1], (1, 0, 0, 0), mode="replicate")
@@ -393,7 +422,11 @@ class SS2D(nn.Module):
         direction_pair = torch.sqrt(
             torch.clamp(family_probability * torch.cat((f_hn, f_vn), dim=1), min=1e-6)
         )
-        return (probability_pair * direction_pair).clamp_(0.0, 1.0)
+        # Keep probability as the stable base signal and let direction refine it.
+        # direction_mix=1 reproduces the 8.26 product; smaller values are more
+        # tolerant of uncertain orientation on curved and branching cracks.
+        direction_factor = (1.0 - self.direction_mix) + self.direction_mix * direction_pair
+        return (probability_pair * direction_factor).clamp_(0.0, 1.0)
 
     def orientation_scores(self, orientation: torch.Tensor) -> torch.Tensor:
         """Map the structure-head output to scan-family scores.
@@ -1000,7 +1033,8 @@ class EfficientCrackAlignedState(nn.Module):
                  edge_transition_max=0.5, edge_write_init=0.05,
                  edge_write_max=0.25, scan_gate_init=0.05, scan_gate_max=0.5,
                  orientation_temperature=1.0, enable_transition=True,
-                 enable_write=True, enable_fusion=True):
+                 enable_write=True, enable_fusion=True, structure_kernel=1,
+                 structure_init_std=0.0, direction_mix=1.0):
         super().__init__()
         self.channels = int(channels)
         self.state_ratio = float(state_ratio)
@@ -1010,6 +1044,7 @@ class EfficientCrackAlignedState(nn.Module):
             raise ValueError("route_init must be between 0 and route_max")
         route_ratio = route_init / route_max
         self.route_raw = nn.Parameter(torch.tensor(math.log(route_ratio / (1.0 - route_ratio))))
+        self.route_raw._no_weight_decay = True
         self.route_max = float(route_max)
         self.norm = LayerNorm2d(self.state_channels)
         self.state = SS2D(
@@ -1033,6 +1068,9 @@ class EfficientCrackAlignedState(nn.Module):
             edge_enable_transition=enable_transition,
             edge_enable_write=enable_write,
             edge_enable_fusion=enable_fusion,
+            structure_kernel=structure_kernel,
+            structure_init_std=structure_init_std,
+            direction_mix=direction_mix,
             forward_type="v2noz",
         )
 
@@ -1059,7 +1097,8 @@ class _AdaptiveCASPUnit(nn.Module):
                  edge_write_init=0.05, edge_write_max=0.25,
                  scan_gate_init=0.05, scan_gate_max=0.5,
                  orientation_temperature=1.0, enable_transition=True,
-                 enable_write=True, enable_fusion=True):
+                 enable_write=True, enable_fusion=True, structure_kernel=1,
+                 structure_init_std=0.0, direction_mix=1.0):
         super().__init__()
         self.local = C3k(channels, channels, 2, shortcut) if c3k else Bottleneck(
             channels, channels, shortcut, 1, k=((3, 3), (3, 3)), e=1.0
@@ -1068,7 +1107,8 @@ class _AdaptiveCASPUnit(nn.Module):
             channels, state_ratio, route_init, route_max, d_state, ssm_ratio,
             edge_transition_init, edge_transition_max, edge_write_init,
             edge_write_max, scan_gate_init, scan_gate_max,
-            orientation_temperature, enable_transition, enable_write, enable_fusion
+            orientation_temperature, enable_transition, enable_write, enable_fusion,
+            structure_kernel, structure_init_std, direction_mix
         )
 
     def forward(self, x):
@@ -1090,7 +1130,8 @@ class AdaptiveC3k2CASP(nn.Module):
                  edge_write_init=0.05, edge_write_max=0.25,
                  scan_gate_init=0.05, scan_gate_max=0.5,
                  orientation_temperature=1.0, enable_transition=True,
-                 enable_write=True, enable_fusion=True, shortcut=True):
+                 enable_write=True, enable_fusion=True, structure_kernel=1,
+                 structure_init_std=0.0, direction_mix=1.0, shortcut=True):
         super().__init__()
         self.c = int(c2 * e)
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
@@ -1103,7 +1144,8 @@ class AdaptiveC3k2CASP(nn.Module):
                     ssm_ratio, edge_transition_init, edge_transition_max,
                     edge_write_init, edge_write_max, scan_gate_init,
                     scan_gate_max, orientation_temperature, enable_transition,
-                    enable_write, enable_fusion
+                    enable_write, enable_fusion, structure_kernel,
+                    structure_init_std, direction_mix
                 )
             else:
                 unit = C3k(self.c, self.c, 2, shortcut) if c3k else Bottleneck(
@@ -1127,7 +1169,8 @@ class AdaptiveC2fCASP(AdaptiveC3k2CASP):
                  edge_transition_max=0.5, edge_write_init=0.05,
                  edge_write_max=0.25, scan_gate_init=0.05,
                  scan_gate_max=0.5, orientation_temperature=1.0,
-                 enable_transition=True, enable_write=True, enable_fusion=True):
+                 enable_transition=True, enable_write=True, enable_fusion=True,
+                 structure_kernel=1, structure_init_std=0.0, direction_mix=1.0):
         # g is accepted for a C2f-compatible YAML signature; the current local
         # bottleneck remains group=1 to keep the CASP wrapper lightweight.
         del g
@@ -1136,7 +1179,8 @@ class AdaptiveC2fCASP(AdaptiveC3k2CASP):
             ssm_ratio, edge_transition_init, edge_transition_max,
             edge_write_init, edge_write_max, scan_gate_init, scan_gate_max,
             orientation_temperature, enable_transition, enable_write,
-            enable_fusion, shortcut
+            enable_fusion, structure_kernel, structure_init_std, direction_mix,
+            shortcut
         )
 
 

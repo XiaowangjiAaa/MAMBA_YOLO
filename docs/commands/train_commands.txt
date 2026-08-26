@@ -209,3 +209,21 @@ python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 26B 26M --seeds
 # Run only after the main candidate passes seed0.
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 26A --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 26D --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --crack-metric-conf 0.25 --cldice-iters 20 --continue-on-error
+
+
+########################################################################
+## 8.27 Mask-mAP50-driven full-CASP parameter optimization
+########################################################################
+
+python check_yaml.py --aug27 --quick --device cuda:0
+
+# Mandatory anchor: new checkpoint-rule baseline and the fixed full-CASP reference.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27B 27F --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# Optimize learning first, control strengths second, capacity last.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27G --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27O 27R 27D --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27C --seeds 0 --device 0,1 --epochs 300 --patience 100 --batch-size 16 --workers 128 --save-period 10 --continue-on-error
+
+# Primary final checkpoint.
+python mbyolo_train.py --task val --weights output_dir/crack-seg-8.27/X01_crack-seg_seed0/weights/best_map50.pt --data ../crack-seg/crack-seg.yaml --device 0 --batch_size 16 --imgsz 640 --crack_metric_conf 0.25 --cldice_iters 20

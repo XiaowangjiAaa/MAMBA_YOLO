@@ -114,6 +114,7 @@ class BaseTrainer:
             yaml_save(self.save_dir / "args.yaml", vars(self.args))  # save run args
         self.last, self.best = self.wdir / "last.pt", self.wdir / "best.pt"  # checkpoint paths
         self.best_mask = self.wdir / "best_mask.pt"  # segmentation-specific checkpoint
+        self.best_map50 = self.wdir / "best_map50.pt"  # primary crack metric: Mask mAP50
         self.save_period = self.args.save_period
 
         self.batch_size = self.args.batch
@@ -138,8 +139,10 @@ class BaseTrainer:
         # Epoch level metrics
         self.best_fitness = None
         self.best_mask_fitness = None
+        self.best_mask_map50 = None
         self.fitness = None
         self.mask_fitness = None
+        self.mask_map50 = None
         self.loss = None
         self.tloss = None
         self.loss_names = ["Loss"]
@@ -426,9 +429,9 @@ class BaseTrainer:
                 if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
                     self.metrics, self.fitness = self.validate()
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
-                # Segmentation early stopping follows mask quality rather than the box+mask aggregate.
+                # Crack segmentation uses Mask mAP50 as its primary checkpoint and stopping metric.
                 # Detection and other tasks retain the original fitness unchanged.
-                stop_fitness = self.mask_fitness if self.mask_fitness is not None else self.fitness
+                stop_fitness = self.mask_map50 if self.mask_map50 is not None else self.fitness
                 self.stop |= self.stopper(epoch + 1, stop_fitness) or final_epoch
                 if self.args.time:
                     self.stop |= (time.time() - self.train_time_start) > (self.args.time * 3600)
@@ -488,7 +491,9 @@ class BaseTrainer:
                 "epoch": self.epoch,
                 "best_fitness": self.best_fitness,
                 "best_mask_fitness": self.best_mask_fitness,
+                "best_mask_map50": self.best_mask_map50,
                 "mask_fitness": self.mask_fitness,
+                "mask_map50": self.mask_map50,
                 "model": None,  # resume and final checkpoints derive from EMA
                 "ema": deepcopy(self.ema.ema).half(),
                 "updates": self.ema.updates,
@@ -511,6 +516,8 @@ class BaseTrainer:
             self.best.write_bytes(serialized_ckpt)  # save best.pt
         if self.mask_fitness is not None and self.best_mask_fitness == self.mask_fitness:
             self.best_mask.write_bytes(serialized_ckpt)  # save best_mask.pt
+        if self.mask_map50 is not None and self.best_mask_map50 == self.mask_map50:
+            self.best_map50.write_bytes(serialized_ckpt)  # save best_map50.pt
         if (self.save_period > 0) and (self.epoch > 0) and (self.epoch % self.save_period == 0):
             (self.wdir / f"epoch{self.epoch}.pt").write_bytes(serialized_ckpt)  # save epoch, i.e. 'epoch3.pt'
 
@@ -573,9 +580,10 @@ class BaseTrainer:
         The returned dict is expected to contain "fitness" key.
         """
         metrics = self.validator(self)
-        # Keep mask_fitness in the returned metrics so results.csv records exactly
-        # why a given epoch became best_mask.pt.
+        # Keep both segmentation selectors in results.csv. Mask mAP50 is the
+        # primary crack metric; mask_fitness remains for backward comparison.
         self.mask_fitness = metrics.get("metrics/mask_fitness")
+        self.mask_map50 = metrics.get("metrics/mAP50(M)")
         fitness = metrics.pop("fitness", -self.loss.detach().cpu().numpy())  # use loss as fitness measure if not found
         if not self.best_fitness or self.best_fitness < fitness:
             self.best_fitness = fitness
@@ -583,6 +591,10 @@ class BaseTrainer:
             self.best_mask_fitness is None or self.best_mask_fitness < self.mask_fitness
         ):
             self.best_mask_fitness = self.mask_fitness
+        if self.mask_map50 is not None and (
+            self.best_mask_map50 is None or self.best_mask_map50 < self.mask_map50
+        ):
+            self.best_mask_map50 = self.mask_map50
         return metrics, fitness
 
     def get_model(self, cfg=None, weights=None, verbose=True):
@@ -650,18 +662,19 @@ class BaseTrainer:
 
     def final_eval(self):
         """Performs final evaluation and validation for object detection YOLO model."""
-        for f in self.last, self.best, self.best_mask:
+        for f in self.last, self.best, self.best_mask, self.best_map50:
             if f.exists():
                 strip_optimizer(f)  # strip optimizers
-                if f is self.best or f is self.best_mask:
+                if f is self.best or f is self.best_mask or f is self.best_map50:
                     LOGGER.info(f"\nValidating {f}...")
                     self.validator.args.plots = self.args.plots
                     # SegmentationValidator uses this optional name; other validators ignore it.
-                    self.validator.report_filename = (
-                        "segmentation_eval_report_best_mask.txt"
-                        if f is self.best_mask
-                        else "segmentation_eval_report.txt"
-                    )
+                    if f is self.best_map50:
+                        self.validator.report_filename = "segmentation_eval_report_best_map50.txt"
+                    elif f is self.best_mask:
+                        self.validator.report_filename = "segmentation_eval_report_best_mask.txt"
+                    else:
+                        self.validator.report_filename = "segmentation_eval_report.txt"
                     self.metrics = self.validator(model=f)
                     self.metrics.pop("fitness", None)
                     self.run_callbacks("on_fit_epoch_end")
@@ -699,11 +712,13 @@ class BaseTrainer:
             return
         best_fitness = 0.0
         best_mask_fitness = None
+        best_mask_map50 = None
         start_epoch = ckpt.get("epoch", -1) + 1
         if ckpt.get("optimizer", None) is not None:
             self.optimizer.load_state_dict(ckpt["optimizer"])  # optimizer
             best_fitness = ckpt["best_fitness"]
             best_mask_fitness = ckpt.get("best_mask_fitness")
+            best_mask_map50 = ckpt.get("best_mask_map50")
         if self.ema and ckpt.get("ema"):
             self.ema.ema.load_state_dict(ckpt["ema"].float().state_dict())  # EMA
             self.ema.updates = ckpt["updates"]
@@ -719,6 +734,7 @@ class BaseTrainer:
             self.epochs += ckpt["epoch"]  # finetune additional epochs
         self.best_fitness = best_fitness
         self.best_mask_fitness = best_mask_fitness
+        self.best_mask_map50 = best_mask_map50
         self.start_epoch = start_epoch
         if start_epoch > (self.epochs - self.args.close_mosaic):
             self._close_dataloader_mosaic()
@@ -768,7 +784,10 @@ class BaseTrainer:
                 fullname = f"{module_name}.{param_name}" if module_name else param_name
                 if "bias" in fullname:  # bias (no decay)
                     g[2].append(param)
-                elif isinstance(module, bn):  # weight (no decay)
+                elif isinstance(module, bn) or getattr(param, "_no_weight_decay", False):
+                    # Normalization weights and bounded scalar control gates must
+                    # not drift merely because weight decay pulls their raw
+                    # logits toward zero.
                     g[1].append(param)
                 else:  # weight (with decay)
                     g[0].append(param)

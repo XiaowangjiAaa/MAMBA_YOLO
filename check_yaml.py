@@ -169,6 +169,25 @@ AUG26_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(AUG26_EXPERIMENTS)
 
+AUG27_EXPERIMENTS = {
+    "X00": "../11/8.27-experiments/X00-yolo11-seg-map50-baseline.yaml",
+    "X01": "../11/8.27-experiments/X01-casp-reference.yaml",
+    "X02": "../11/8.27-experiments/X02-guidance001.yaml",
+    "X03": "../11/8.27-experiments/X03-guidance005.yaml",
+    "X04": "../11/8.27-experiments/X04-guidance010.yaml",
+    "X05": "../11/8.27-experiments/X05-orientation0005.yaml",
+    "X06": "../11/8.27-experiments/X06-orientation001.yaml",
+    "X07": "../11/8.27-experiments/X07-route002.yaml",
+    "X08": "../11/8.27-experiments/X08-route010.yaml",
+    "X09": "../11/8.27-experiments/X09-direction-mix025.yaml",
+    "X10": "../11/8.27-experiments/X10-direction-mix075.yaml",
+    "X11": "../11/8.27-experiments/X11-ratio0375.yaml",
+    "X12": "../11/8.27-experiments/X12-ratio050.yaml",
+    "X13": "../11/8.27-experiments/X13-ratio0375-dstate16.yaml",
+    "X14": "../11/8.27-experiments/X14-stage-specific-p3p4.yaml",
+}
+ALL_EXPERIMENTS.update(AUG27_EXPERIMENTS)
+
 # ---- Colours ----
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -572,6 +591,56 @@ def test_826_structure(model, config_path):
     return True, f"adapters={len(adapters)}, partial ratios={[m.state_ratio for m in states]}, roles={expected_roles}"
 
 
+def test_827_structure(model, config_path):
+    """Verify the fixed full-CASP parameter-search contract for 8.27."""
+    if "8.27-experiments" not in str(config_path):
+        return True, "not an 8.27 config"
+    name = Path(config_path).name
+    adapters = [m for m in model.modules() if m.__class__.__name__ == "AdaptiveC3k2CASP"]
+    if name.startswith("X00-"):
+        return (not adapters, "Mask-mAP50 YOLO11 baseline" if not adapters else "baseline contains CASP")
+    if len(adapters) != 2 or model.model[4].__class__.__name__ != "AdaptiveC3k2CASP" or model.model[6].__class__.__name__ != "AdaptiveC3k2CASP":
+        return False, f"8.27 requires exactly P3/P4 CASP, got {len(adapters)} adapter(s)"
+    states = [m for m in model.modules() if m.__class__.__name__ == "EfficientCrackAlignedState"]
+    ss2d = [m.state for m in states]
+    if not all(m.edge_enable_transition and m.edge_enable_write and m.edge_enable_fusion for m in ss2d):
+        return False, "8.27 fixes the complete transition/write/fusion module; no component may be disabled"
+    if not all(m.structure_kernel == 3 and abs(m.structure_init_std - 0.01) < 1e-12 for m in ss2d):
+        return False, "8.27 requires the learnable DW3x3 structure head with init std 0.01"
+    controlled = [state.route_raw for state in states]
+    controlled += [parameter for m in ss2d for parameter in (m.edge_transition_raw, m.edge_write_raw, m.orientation_gate)]
+    if not all(getattr(parameter, "_no_weight_decay", False) for parameter in controlled):
+        return False, "CASP scalar controls must be excluded from optimizer weight decay"
+
+    expected_guidance = {"X02-": 0.01, "X03-": 0.05, "X04-": 0.10}.get(
+        next((key for key in ("X02-", "X03-", "X04-") if name.startswith(key)), ""), 0.03
+    )
+    expected_orientation = 0.005 if name.startswith("X05-") else (0.01 if name.startswith("X06-") else 0.0)
+    if abs(float(model.yaml.get("guidance_loss_weight", 0.0)) - expected_guidance) > 1e-12:
+        return False, f"guidance weight mismatch; expected {expected_guidance}"
+    if abs(float(model.yaml.get("orientation_loss_weight", 0.0)) - expected_orientation) > 1e-12:
+        return False, f"orientation weight mismatch; expected {expected_orientation}"
+
+    expected_mix = 0.25 if name.startswith("X09-") else (0.75 if name.startswith("X10-") else 0.50)
+    if any(abs(m.direction_mix - expected_mix) > 1e-12 for m in ss2d):
+        return False, f"direction_mix mismatch; expected {expected_mix}"
+    expected_ratios = ([0.25, 0.375] if name.startswith("X14-") else
+                       [0.50, 0.50] if name.startswith("X12-") else
+                       [0.375, 0.375] if name.startswith(("X11-", "X13-")) else [0.25, 0.25])
+    if [m.state_ratio for m in states] != expected_ratios:
+        return False, f"state ratios={[m.state_ratio for m in states]}, expected={expected_ratios}"
+    expected_dstate = 16 if name.startswith("X13-") else 8
+    if any(m.d_state != expected_dstate for m in ss2d):
+        return False, f"d_state mismatch; expected {expected_dstate}"
+    expected_routes = [0.02, 0.02] if name.startswith("X07-") else (
+        [0.10, 0.10] if name.startswith("X08-") else [0.03, 0.07] if name.startswith("X14-") else [0.05, 0.05]
+    )
+    actual_routes = [float(m.effective_route().detach()) for m in states]
+    if any(abs(a - b) > 1e-6 for a, b in zip(actual_routes, expected_routes)):
+        return False, f"route init={actual_routes}, expected={expected_routes}"
+    return True, f"full CASP; ratios={expected_ratios}, routes={expected_routes}, direction_mix={expected_mix}"
+
+
 def test_live_aux_cache(model):
     """Auxiliary heads must retain the graph; detached copies are visualization-only."""
     guided = [m for m in model.modules() if hasattr(m, "structure_head") or hasattr(m, "guidance_head")]
@@ -607,8 +676,8 @@ def test_826_gradient_reachability(model, config_path, output):
     does not reach the loss graph. This specifically guards component-ablation
     YAMLs such as W07, where a disabled role must also remove its scalar gate.
     """
-    if "8.26-experiments" not in str(config_path) or output is None:
-        return True, "not an 8.26 config"
+    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments")) or output is None:
+        return True, "not an 8.26/8.27 config"
 
     def tensors(value):
         if torch.is_tensor(value):
@@ -677,6 +746,9 @@ def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
     ok, detail = test_826_structure(model, config_path)
     results.append(("8.26 YOLO11/CASP", ok, detail or ""))
 
+    ok, detail = test_827_structure(model, config_path)
+    results.append(("8.27 CASP parameters", ok, detail or ""))
+
     # 2. Deepcopy
     ok, detail = test_deepcopy(model, device)
     results.append(("deepcopy (EMA)", ok, detail or ""))
@@ -688,7 +760,7 @@ def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
         cache_ok, cache_detail = test_live_aux_cache(model)
         results.append(("aux graph attached", cache_ok, cache_detail or ""))
         reach_ok, reach_detail = test_826_gradient_reachability(model, config_path, train_output)
-        results.append(("8.26 gradient reach", reach_ok, reach_detail or ""))
+        results.append(("CASP gradient reach", reach_ok, reach_detail or ""))
 
     # 4. AMP forward
     if device.type == 'cuda':
@@ -729,11 +801,20 @@ def resolve_experiments(args):
         exp_ids.update(AUG24_EXPERIMENTS.keys())
     if args.aug26:
         exp_ids.update(AUG26_EXPERIMENTS.keys())
+    if args.aug27:
+        exp_ids.update(AUG27_EXPERIMENTS.keys())
     if args.experiments:
         for e in args.experiments:
             exp_ids.add(e)
     if args.phase:
         phase_map = {
+            "27B": ["X00"],
+            "27F": ["X01"],
+            "27G": ["X02", "X03", "X04"],
+            "27O": ["X05", "X06"],
+            "27R": ["X07", "X08"],
+            "27D": ["X09", "X10"],
+            "27C": ["X11", "X12", "X13", "X14"],
             "26B": ["W00"],
             "26M": ["W01", "W06"],
             "26D": ["W02", "W03"],
@@ -781,7 +862,8 @@ def parse_args():
     parser.add_argument("--aug23", action="store_true", help="Check the four focused 8.23 experiments")
     parser.add_argument("--aug24", action="store_true", help="Check the five corrected-H/V 8.24 experiments")
     parser.add_argument("--aug26", action="store_true", help="Check the eight true-YOLO11/CASP 8.26 experiments")
-    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 26B 26M 26D 26A, 24F 24H 24R, or legacy")
+    parser.add_argument("--aug27", action="store_true", help="Check all fixed-full-CASP 8.27 parameter experiments")
+    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 27B 27F 27G 27O 27R 27D 27C, or legacy")
     parser.add_argument("--experiments", nargs="+", default=None, help="Experiment IDs: B0 S1 C2 ...")
     parser.add_argument("--exclude", nargs="+", default=None, help="IDs to exclude")
     parser.add_argument("--list", action="store_true", help="List available experiments")

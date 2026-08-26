@@ -310,6 +310,26 @@ AUG26_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(AUG26_EXPERIMENTS)
 
+# 2026-08-27: fixed full CASP; performance-oriented parameter optimization.
+AUG27_EXPERIMENTS = {
+    "X00": {"config": "../11/8.27-experiments/X00-yolo11-seg-map50-baseline.yaml", "desc": "YOLO11 baseline with Mask-mAP50 checkpoint selection", "phase": "27B"},
+    "X01": {"config": "../11/8.27-experiments/X01-casp-reference.yaml", "desc": "Full learnable CASP reference", "phase": "27F"},
+    "X02": {"config": "../11/8.27-experiments/X02-guidance001.yaml", "desc": "Probability guidance weight 0.01", "phase": "27G"},
+    "X03": {"config": "../11/8.27-experiments/X03-guidance005.yaml", "desc": "Probability guidance weight 0.05", "phase": "27G"},
+    "X04": {"config": "../11/8.27-experiments/X04-guidance010.yaml", "desc": "Probability guidance weight 0.10", "phase": "27G"},
+    "X05": {"config": "../11/8.27-experiments/X05-orientation0005.yaml", "desc": "H/V family supervision weight 0.005", "phase": "27O"},
+    "X06": {"config": "../11/8.27-experiments/X06-orientation001.yaml", "desc": "H/V family supervision weight 0.01", "phase": "27O"},
+    "X07": {"config": "../11/8.27-experiments/X07-route002.yaml", "desc": "Residual route init 0.02", "phase": "27R"},
+    "X08": {"config": "../11/8.27-experiments/X08-route010.yaml", "desc": "Residual route init 0.10", "phase": "27R"},
+    "X09": {"config": "../11/8.27-experiments/X09-direction-mix025.yaml", "desc": "Probability-dominant direction mix 0.25", "phase": "27D"},
+    "X10": {"config": "../11/8.27-experiments/X10-direction-mix075.yaml", "desc": "Direction mix 0.75", "phase": "27D"},
+    "X11": {"config": "../11/8.27-experiments/X11-ratio0375.yaml", "desc": "State ratio 0.375", "phase": "27C"},
+    "X12": {"config": "../11/8.27-experiments/X12-ratio050.yaml", "desc": "State ratio 0.50", "phase": "27C"},
+    "X13": {"config": "../11/8.27-experiments/X13-ratio0375-dstate16.yaml", "desc": "State ratio 0.375 with d_state 16", "phase": "27C"},
+    "X14": {"config": "../11/8.27-experiments/X14-stage-specific-p3p4.yaml", "desc": "Stage-specific P3 detail and P4 semantic-memory strengths", "phase": "27C"},
+}
+ALL_EXPERIMENTS.update(AUG27_EXPERIMENTS)
+
 
 def load_status():
     if STATUS_FILE.exists():
@@ -352,7 +372,9 @@ def build_cmd(exp_name, exp_info, args):
         print(f"  [WARN] Config not found: {config_path}")
         return None
 
-    if exp_name in AUG26_EXPERIMENTS:
+    if exp_name in AUG27_EXPERIMENTS:
+        default_project = f"./output_dir/{args.data_stem}-8.27"
+    elif exp_name in AUG26_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.26"
     elif exp_name in AUG24_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.24"
@@ -595,6 +617,10 @@ Usage examples:
   # 8.26: true YOLO11 baseline, primary method and efficiency control
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 26B 26M --seeds 0
 
+  # 8.27: establish the full-CASP reference, then tune one parameter family at a time
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27B 27F --seeds 0
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27G 27O 27R 27D 27C --seeds 0
+
   # 8.24: corrected Q00 first, then seed-0 stability controls
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24F --seeds 0 1 2
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24H 24R --seeds 0
@@ -612,7 +638,7 @@ Usage examples:
     exp_group.add_argument("--experiments", nargs="+", default=None,
                            help="Specific experiment IDs to run (e.g. B0 S1 S2)")
     exp_group.add_argument("--phase", nargs="+", default=None,
-                           help="Run phases 26B/26M/26D/26A, 24F/24H/24R, or legacy phases")
+                           help="Run phases 27B/27F/27G/27O/27R/27D/27C, 26B/26M/26D/26A, or legacy")
     exp_group.add_argument("--exclude", nargs="+", default=None,
                            help="Experiment IDs to exclude")
 
@@ -620,7 +646,7 @@ Usage examples:
     parser.add_argument("--list", action="store_true",
                         help="List all available experiments and exit")
     parser.add_argument("--list-group", default=None,
-                        help="Filter list by phase (26B, 26M, 26D, 26A, 24F, 24H, 24R, or legacy)")
+                        help="Filter list by phase (27B, 27F, 27G, 27O, 27R, 27D, 27C, or legacy)")
 
     # Data & training params
     train_group = parser.add_argument_group("Training configuration")
@@ -686,20 +712,21 @@ def resolve_experiments(args):
                 if str(info["phase"]) == p:
                     exp_ids.add(eid)
     if not exp_ids and not args.list:
-        # Default: run the true-YOLO11 8.26 set. Older experiments remain addressable by ID/phase.
+        # Default: run the current 8.27 parameter-search set. Use phases to stage expensive runs.
         use_all = True
-        exp_ids = set(AUG26_EXPERIMENTS.keys())
+        exp_ids = set(AUG27_EXPERIMENTS.keys())
 
     if args.exclude:
         for e in args.exclude:
             exp_ids.discard(e)
 
     # Sort by phase then by name for a sensible order
-    phase_order = {"26B": 0, "26M": 1, "26D": 2, "26A": 3,
-                   "24F": 4, "24H": 5, "24R": 6, "23F": 7, "23A": 8,
-                   "19C": 9, "19G": 10, "17A": 11, "17G": 12, "12S": 13,
-                   "12M": 14, "12U": 15, "A": 16, "B": 17, "C": 18,
-                   "1": 19, "2": 20, "3": 21, "4": 22, "dv2": 23, "v8": 24}
+    phase_order = {"27B": 0, "27F": 1, "27G": 2, "27O": 3, "27R": 4, "27D": 5, "27C": 6,
+                   "26B": 7, "26M": 8, "26D": 9, "26A": 10,
+                   "24F": 11, "24H": 12, "24R": 13, "23F": 14, "23A": 15,
+                   "19C": 16, "19G": 17, "17A": 18, "17G": 19, "12S": 20,
+                   "12M": 21, "12U": 22, "A": 23, "B": 24, "C": 25,
+                   "1": 26, "2": 27, "3": 28, "4": 29, "dv2": 30, "v8": 31}
     sorted_ids = sorted(
         exp_ids,
         key=lambda x: (phase_order.get(str(ALL_EXPERIMENTS[x]["phase"]), 99), x),

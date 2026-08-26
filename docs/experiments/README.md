@@ -10,5 +10,6 @@ Read the documents chronologically:
 6. [8.23 Q00 and component ablations](8.23_P5_DIRECTIONAL_UNIFIED_AND_COMPONENT_ABLATION.md)
 7. [8.24 corrected H/V mapping and stability experiments](8.24_Q00_CORRECTED_HV_AND_STABILITY_EXPERIMENTS.md)
 8. [8.26 true YOLO11 efficient crack-aligned state propagation](8.26_EFFICIENT_YOLO11_CRACK_ALIGNED_STATE_PROPAGATION.md)
+9. [8.27 Mask-mAP50-driven full-CASP optimization](8.27_MASK_MAP50_DRIVEN_FULL_CASP_OPTIMIZATION.md)
 
-Current status: 8.24 established that softer H/V fusion is promising but still performs post-scan weighting. The 8.26 W-series restarts from a true YOLO11 C3k2 baseline and evaluates the unified, partial-channel CASP block.
+Current status: 8.26 exposed weak guidance learning and checkpoint-selection mismatch. The 8.27 X-series fixes the complete CASP method and optimizes its learning and capacity parameters with Mask mAP50 as the primary metric.
