@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-structure-maps",
         action="store_true",
-        help="Do not auto-save crack probability, orientation-family and edge-confidence maps.",
+        help="Do not auto-save crack probability, tangent, connectivity and dynamic-path maps.",
     )
     parser.add_argument("--output", default="feature_visualization", help="Output directory.")
     return parser.parse_args()
@@ -187,7 +187,10 @@ def print_and_save_layers(model: nn.Module, output_dir: Path) -> None:
 
 def auto_layer_names(model: nn.Module) -> list[str]:
     """Choose top-level feature-producing blocks without assuming one exact YAML."""
-    preferred = ("AdaptiveC3k2CASP", "C3k2", "VSSBlock", "XSSBlock", "C2PSA", "SPPF", "Bottleneck", "C2f", "C3")
+    preferred = (
+        "AdaptiveC3k2CrackPath", "AdaptiveC3k2CASP", "C3k2", "VSSBlock", "XSSBlock",
+        "C2PSA", "SPPF", "Bottleneck", "C2f", "C3"
+    )
     selected = []
     for name, module in model.named_modules():
         if is_top_level_layer(name) and any(token in type(module).__name__ for token in preferred):
@@ -348,15 +351,50 @@ def save_orientation_visual(
     )
 
 
+def save_dynamic_paths(name: str, indices: torch.Tensor, valid_mask: torch.Tensor,
+                       feature_size: tuple[int, int], input_bgr: np.ndarray,
+                       output_dir: Path) -> tuple[np.ndarray, float]:
+    """Overlay the first image's sparse image-adaptive token paths."""
+    height, width = feature_size
+    overlay = input_bgr.copy()
+    indices = indices[0].detach().cpu()
+    valid_mask = valid_mask[0].detach().cpu().bool()
+    palette = ((0, 255, 255), (255, 160, 0), (80, 255, 80), (255, 80, 220))
+    visited = set()
+    for path_index in range(min(indices.shape[0], 64)):
+        token_ids = indices[path_index][valid_mask[path_index]].tolist()
+        if len(token_ids) < 2:
+            continue
+        visited.update(token_ids)
+        points = np.asarray([
+            (
+                round(((token_id % width) + 0.5) * input_bgr.shape[1] / width),
+                round(((token_id // width) + 0.5) * input_bgr.shape[0] / height),
+            )
+            for token_id in token_ids
+        ], dtype=np.int32)
+        cv2.polylines(overlay, [points], False, palette[path_index % len(palette)], 1, cv2.LINE_AA)
+    coverage = len(visited) / float(height * width)
+    stem = sanitize(f"{name}_dynamic_paths")
+    cv2.imwrite(str(output_dir / f"{stem}_overlay.png"), overlay)
+    panel = np.concatenate(
+        (add_label(input_bgr, "input"), add_label(overlay, f"dynamic crack paths | coverage={coverage:.3f}")), axis=1
+    )
+    return panel, coverage
+
+
 def save_structure_maps(
     model: nn.Module, input_bgr: np.ndarray, output_dir: Path, overlay_alpha: float, save_npy: bool
 ) -> tuple[list[np.ndarray], list[dict[str, Any]]]:
-    """Export probability, direction-family and crack-edge maps cached by SS2D."""
+    """Export probability, tangent, connectivity, edge and dynamic-path caches."""
     panels, records = [], []
     for name, module in model.named_modules():
         guidance = getattr(module, "last_guidance", None)
         orientation = getattr(module, "last_orientation", None)
+        connectivity = getattr(module, "last_connectivity", None)
         edge_confidence = getattr(module, "last_edge_confidence", None)
+        path_indices = getattr(module, "last_path_indices", None)
+        path_mask = getattr(module, "last_path_mask", None)
         if torch.is_tensor(guidance):
             guidance = guidance.detach().float().cpu()
             panels.append(
@@ -382,6 +420,14 @@ def save_structure_maps(
             if save_npy:
                 np.save(output_dir / f"{sanitize(name)}_orientation.npy", orientation[0].numpy())
             records.append({"layer": name, "kind": "orientation", "shape": list(orientation.shape)})
+        if torch.is_tensor(connectivity) and connectivity.shape[1] == 4:
+            connectivity = connectivity.detach().float().cpu()
+            for index, family in enumerate(("horizontal", "vertical", "main_diagonal", "anti_diagonal")):
+                panels.append(save_feature_visuals(
+                    name, f"connectivity_{family}", connectivity[:, index:index + 1],
+                    input_bgr, output_dir, "mean", 99.0, overlay_alpha, save_npy
+                ))
+            records.append({"layer": name, "kind": "crack_connectivity_hvda", "shape": list(connectivity.shape)})
         if torch.is_tensor(edge_confidence) and edge_confidence.shape[1] == 2:
             edge_confidence = edge_confidence.detach().float().cpu()
             for index, family in enumerate(("horizontal", "vertical")):
@@ -390,6 +436,16 @@ def save_structure_maps(
                     input_bgr, output_dir, "mean", 99.0, overlay_alpha, save_npy
                 ))
             records.append({"layer": name, "kind": "crack_edge_hv", "shape": list(edge_confidence.shape)})
+        if (torch.is_tensor(path_indices) and torch.is_tensor(path_mask)
+                and torch.is_tensor(guidance)):
+            panel, coverage = save_dynamic_paths(
+                name, path_indices, path_mask, tuple(guidance.shape[-2:]), input_bgr, output_dir
+            )
+            panels.append(panel)
+            records.append({
+                "layer": name, "kind": "dynamic_crack_paths", "shape": list(path_indices.shape),
+                "coverage_first_image": coverage,
+            })
     return panels, records
 
 

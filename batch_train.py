@@ -330,6 +330,27 @@ AUG27_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(AUG27_EXPERIMENTS)
 
+# 2026-08-28: final sparse adaptive crack-path Mamba; full-module parameter tuning only.
+AUG28_EXPERIMENTS = {
+    "Y00": {"config": "../11/8.28-experiments/Y00-crack-path-reference.yaml", "desc": "Full sparse crack-path reference", "phase": "28F"},
+    "Y01": {"config": "../11/8.28-experiments/Y01-seed-ratio001.yaml", "desc": "Sparse 1% path seeds", "phase": "28S"},
+    "Y02": {"config": "../11/8.28-experiments/Y02-seed-ratio004.yaml", "desc": "Dense 4% path seeds", "phase": "28S"},
+    "Y03": {"config": "../11/8.28-experiments/Y03-path-steps3.yaml", "desc": "Short local crack paths", "phase": "28S"},
+    "Y04": {"config": "../11/8.28-experiments/Y04-path-steps6.yaml", "desc": "Longer curved crack paths", "phase": "28S"},
+    "Y05": {"config": "../11/8.28-experiments/Y05-path-conf002.yaml", "desc": "Permissive path continuation", "phase": "28S"},
+    "Y06": {"config": "../11/8.28-experiments/Y06-path-conf010.yaml", "desc": "Conservative path continuation", "phase": "28S"},
+    "Y07": {"config": "../11/8.28-experiments/Y07-connectivity001.yaml", "desc": "Connectivity supervision 0.01", "phase": "28L"},
+    "Y08": {"config": "../11/8.28-experiments/Y08-connectivity005.yaml", "desc": "Connectivity supervision 0.05", "phase": "28L"},
+    "Y09": {"config": "../11/8.28-experiments/Y09-orientation000.yaml", "desc": "No explicit tangent supervision", "phase": "28L"},
+    "Y10": {"config": "../11/8.28-experiments/Y10-orientation001.yaml", "desc": "Tangent supervision 0.01", "phase": "28L"},
+    "Y11": {"config": "../11/8.28-experiments/Y11-route005.yaml", "desc": "Stronger sparse residual route", "phase": "28M"},
+    "Y12": {"config": "../11/8.28-experiments/Y12-memory010.yaml", "desc": "Stronger probability retention", "phase": "28M"},
+    "Y13": {"config": "../11/8.28-experiments/Y13-transition010.yaml", "desc": "Stronger path-edge transition", "phase": "28M"},
+    "Y14": {"config": "../11/8.28-experiments/Y14-write010.yaml", "desc": "Stronger crack-token writing", "phase": "28M"},
+    "Y15": {"config": "../11/8.28-experiments/Y15-dstate16.yaml", "desc": "Larger path-state capacity", "phase": "28M"},
+}
+ALL_EXPERIMENTS.update(AUG28_EXPERIMENTS)
+
 
 def load_status():
     if STATUS_FILE.exists():
@@ -372,7 +393,9 @@ def build_cmd(exp_name, exp_info, args):
         print(f"  [WARN] Config not found: {config_path}")
         return None
 
-    if exp_name in AUG27_EXPERIMENTS:
+    if exp_name in AUG28_EXPERIMENTS:
+        default_project = f"./output_dir/{args.data_stem}-8.28"
+    elif exp_name in AUG27_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.27"
     elif exp_name in AUG26_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.26"
@@ -621,6 +644,10 @@ Usage examples:
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27B 27F --seeds 0
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27G 27O 27R 27D 27C --seeds 0
 
+  # 8.28: final dynamic crack-path module; tune path geometry, structure learning and memory
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28F --seeds 0
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28S 28L 28M --seeds 0
+
   # 8.24: corrected Q00 first, then seed-0 stability controls
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24F --seeds 0 1 2
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24H 24R --seeds 0
@@ -638,7 +665,7 @@ Usage examples:
     exp_group.add_argument("--experiments", nargs="+", default=None,
                            help="Specific experiment IDs to run (e.g. B0 S1 S2)")
     exp_group.add_argument("--phase", nargs="+", default=None,
-                           help="Run phases 27B/27F/27G/27O/27R/27D/27C, 26B/26M/26D/26A, or legacy")
+                           help="Run phases 28F/28S/28L/28M, 27B/27F/27G/27O/27R/27D/27C, or legacy")
     exp_group.add_argument("--exclude", nargs="+", default=None,
                            help="Experiment IDs to exclude")
 
@@ -646,7 +673,7 @@ Usage examples:
     parser.add_argument("--list", action="store_true",
                         help="List all available experiments and exit")
     parser.add_argument("--list-group", default=None,
-                        help="Filter list by phase (27B, 27F, 27G, 27O, 27R, 27D, 27C, or legacy)")
+                        help="Filter list by phase (28F, 28S, 28L, 28M, 27B, 27F, etc.)")
 
     # Data & training params
     train_group = parser.add_argument_group("Training configuration")
@@ -712,17 +739,18 @@ def resolve_experiments(args):
                 if str(info["phase"]) == p:
                     exp_ids.add(eid)
     if not exp_ids and not args.list:
-        # Default: run the current 8.27 parameter-search set. Use phases to stage expensive runs.
+        # Default: run the current 8.28 full crack-path parameter-search set.
         use_all = True
-        exp_ids = set(AUG27_EXPERIMENTS.keys())
+        exp_ids = set(AUG28_EXPERIMENTS.keys())
 
     if args.exclude:
         for e in args.exclude:
             exp_ids.discard(e)
 
     # Sort by phase then by name for a sensible order
-    phase_order = {"27B": 0, "27F": 1, "27G": 2, "27O": 3, "27R": 4, "27D": 5, "27C": 6,
-                   "26B": 7, "26M": 8, "26D": 9, "26A": 10,
+    phase_order = {"28F": 0, "28S": 1, "28L": 2, "28M": 3,
+                   "27B": 4, "27F": 5, "27G": 6, "27O": 7, "27R": 8, "27D": 9, "27C": 10,
+                   "26B": 11, "26M": 12, "26D": 13, "26A": 14,
                    "24F": 11, "24H": 12, "24R": 13, "23F": 14, "23A": 15,
                    "19C": 16, "19G": 17, "17A": 18, "17G": 19, "12S": 20,
                    "12M": 21, "12U": 22, "A": 23, "B": 24, "C": 25,

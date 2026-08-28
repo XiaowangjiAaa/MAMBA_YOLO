@@ -188,6 +188,26 @@ AUG27_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(AUG27_EXPERIMENTS)
 
+AUG28_EXPERIMENTS = {
+    "Y00": "../11/8.28-experiments/Y00-crack-path-reference.yaml",
+    "Y01": "../11/8.28-experiments/Y01-seed-ratio001.yaml",
+    "Y02": "../11/8.28-experiments/Y02-seed-ratio004.yaml",
+    "Y03": "../11/8.28-experiments/Y03-path-steps3.yaml",
+    "Y04": "../11/8.28-experiments/Y04-path-steps6.yaml",
+    "Y05": "../11/8.28-experiments/Y05-path-conf002.yaml",
+    "Y06": "../11/8.28-experiments/Y06-path-conf010.yaml",
+    "Y07": "../11/8.28-experiments/Y07-connectivity001.yaml",
+    "Y08": "../11/8.28-experiments/Y08-connectivity005.yaml",
+    "Y09": "../11/8.28-experiments/Y09-orientation000.yaml",
+    "Y10": "../11/8.28-experiments/Y10-orientation001.yaml",
+    "Y11": "../11/8.28-experiments/Y11-route005.yaml",
+    "Y12": "../11/8.28-experiments/Y12-memory010.yaml",
+    "Y13": "../11/8.28-experiments/Y13-transition010.yaml",
+    "Y14": "../11/8.28-experiments/Y14-write010.yaml",
+    "Y15": "../11/8.28-experiments/Y15-dstate16.yaml",
+}
+ALL_EXPERIMENTS.update(AUG28_EXPERIMENTS)
+
 # ---- Colours ----
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -641,6 +661,65 @@ def test_827_structure(model, config_path):
     return True, f"full CASP; ratios={expected_ratios}, routes={expected_routes}, direction_mix={expected_mix}"
 
 
+def test_828_structure(model, config_path):
+    """Verify that every 8.28 tuning YAML keeps the complete dynamic path module."""
+    if "8.28-experiments" not in str(config_path):
+        return True, "not an 8.28 config"
+    name = Path(config_path).name
+    adapters = [m for m in model.modules() if m.__class__.__name__ == "AdaptiveC3k2CrackPath"]
+    if len(adapters) != 2 or any(model.model[index].__class__.__name__ != "AdaptiveC3k2CrackPath" for index in (4, 6)):
+        return False, f"8.28 requires exactly P3/P4 AdaptiveC3k2CrackPath, got {len(adapters)}"
+    states = [m for m in model.modules() if m.__class__.__name__ == "SparseCrackPathState"]
+    if len(states) != 2:
+        return False, f"expected two SparseCrackPathState cores, got {len(states)}"
+    if any(m.structure_head[-1].out_channels != 7 for m in states):
+        return False, "structure head must predict p + double-angle tangent + four connectivity families"
+    if any(m.max_paths != 128 or m.state_ratio != 0.25 for m in states):
+        return False, "8.28 fixes max_paths=128 and state_ratio=0.25"
+
+    expected_seed = 0.01 if name.startswith("Y01-") else (0.04 if name.startswith("Y02-") else 0.02)
+    expected_steps = 3 if name.startswith("Y03-") else (6 if name.startswith("Y04-") else 4)
+    expected_conf = 0.02 if name.startswith("Y05-") else (0.10 if name.startswith("Y06-") else 0.05)
+    expected_route = 0.05 if name.startswith("Y11-") else 0.02
+    expected_memory = 0.10 if name.startswith("Y12-") else 0.05
+    expected_transition = 0.10 if name.startswith("Y13-") else 0.05
+    expected_write = 0.10 if name.startswith("Y14-") else 0.05
+    expected_dstate = 16 if name.startswith("Y15-") else 8
+    for state in states:
+        actual = (
+            state.seed_ratio, state.path_steps, state.path_min_conf, float(state.effective_route().detach()),
+            float(state.path_ssm.effective_memory().detach()), float(state.path_ssm.effective_transition().detach()),
+            float(state.path_ssm.effective_write().detach()), state.path_ssm.d_state,
+        )
+        expected = (
+            expected_seed, expected_steps, expected_conf, expected_route,
+            expected_memory, expected_transition, expected_write, expected_dstate,
+        )
+        if any(abs(float(a) - float(b)) > 1e-6 for a, b in zip(actual, expected)):
+            return False, f"path parameter mismatch: actual={actual}, expected={expected}"
+        controlled = (
+            state.route_raw, state.path_ssm.memory_raw,
+            state.path_ssm.transition_raw, state.path_ssm.write_raw,
+        )
+        if not all(getattr(parameter, "_no_weight_decay", False) for parameter in controlled):
+            return False, "path/memory scalar controls must be excluded from weight decay"
+
+    expected_connectivity = 0.01 if name.startswith("Y07-") else (0.05 if name.startswith("Y08-") else 0.03)
+    expected_orientation = 0.0 if name.startswith("Y09-") else (0.01 if name.startswith("Y10-") else 0.005)
+    losses = (
+        float(model.yaml.get("guidance_loss_weight", 0.0)),
+        float(model.yaml.get("connectivity_loss_weight", 0.0)),
+        float(model.yaml.get("orientation_loss_weight", 0.0)),
+    )
+    expected_losses = (0.10, expected_connectivity, expected_orientation)
+    if any(abs(a - b) > 1e-12 for a, b in zip(losses, expected_losses)):
+        return False, f"structure-loss mismatch: actual={losses}, expected={expected_losses}"
+    return True, (
+        f"full sparse path; seed={expected_seed}, steps={expected_steps}, conf={expected_conf}, "
+        f"route={expected_route}, memory/transition/write={expected_memory}/{expected_transition}/{expected_write}"
+    )
+
+
 def test_live_aux_cache(model):
     """Auxiliary heads must retain the graph; detached copies are visualization-only."""
     guided = [m for m in model.modules() if hasattr(m, "structure_head") or hasattr(m, "guidance_head")]
@@ -659,6 +738,8 @@ def test_live_aux_cache(model):
         probe_terms.append(module.last_guidance.mean())
         if getattr(module, "last_orientation", None) is not None:
             probe_terms.append(module.last_orientation.mean())
+        if getattr(module, "last_connectivity", None) is not None:
+            probe_terms.append(module.last_connectivity.mean())
         for head_name in ("structure_head", "guidance_head", "orientation_head"):
             head = getattr(module, head_name, None)
             if head is not None:
@@ -669,6 +750,72 @@ def test_live_aux_cache(model):
     return True, f"{len(guided)} live graph(s); gradient reaches guidance head(s)"
 
 
+def test_828_structure_losses(model, config_path):
+    """Numerically exercise all enabled 8.28 auxiliary structure losses."""
+    if "8.28-experiments" not in str(config_path):
+        return True, "not an 8.28 config"
+    # Keep this check explicit: an updated check_yaml.py combined with an old
+    # ultralytics/utils/loss.py previously raised an unhelpful AttributeError.
+    # Reporting the loaded file is especially useful on training servers where
+    # an installed ``ultralytics`` package may shadow the repository checkout.
+    import ultralytics.utils.loss as loss_module
+
+    v8SegmentationLoss = loss_module.v8SegmentationLoss
+    required_api = (
+        "_probability_guidance_loss",
+        "_connectivity_guidance_loss",
+        "_semantic_tangent_loss",
+    )
+    missing_api = [name for name in required_api if not hasattr(v8SegmentationLoss, name)]
+    loaded_loss = Path(loss_module.__file__).resolve()
+    expected_loss = (ROOT / "ultralytics" / "utils" / "loss.py").resolve()
+    if missing_api:
+        return False, (
+            f"8.28 loss API mismatch: missing {', '.join(missing_api)}; "
+            f"loaded={loaded_loss}. Sync {expected_loss} to the training server."
+        )
+    if loaded_loss != expected_loss:
+        return False, (
+            f"8.28 imported the wrong ultralytics loss module: loaded={loaded_loss}; "
+            f"expected={expected_loss}. Run check_yaml.py from the repository root "
+            "and remove the external package path from PYTHONPATH."
+        )
+
+    states = [m for m in model.modules() if m.__class__.__name__ == "SparseCrackPathState"]
+    if not states or any(m.last_guidance is None for m in states):
+        return False, "dynamic path forward did not populate structure tensors"
+    batch = states[0].last_guidance.shape[0]
+    height, width = states[0].last_guidance.shape[-2:]
+    target = states[0].last_guidance.new_zeros((batch, height * 4, width * 4))
+    # Thin crossing/curved-like strokes ensure every family loss has positives.
+    diagonal = torch.arange(min(target.shape[-2:]), device=target.device)
+    target[:, diagonal, diagonal] = 1.0
+    target[:, target.shape[-2] // 2, :] = 1.0
+    terms = []
+    for state in states:
+        terms.append(float(model.yaml.get("guidance_loss_weight", 0.0)) *
+                     v8SegmentationLoss._probability_guidance_loss(state.last_guidance, target, 1.0))
+        connectivity_weight = float(model.yaml.get("connectivity_loss_weight", 0.0))
+        if connectivity_weight > 0:
+            terms.append(connectivity_weight * v8SegmentationLoss._connectivity_guidance_loss(
+                state.last_connectivity, target
+            ))
+        orientation_weight = float(model.yaml.get("orientation_loss_weight", 0.0))
+        if orientation_weight > 0:
+            terms.append(orientation_weight * v8SegmentationLoss._semantic_tangent_loss(
+                state.last_orientation, target
+            ))
+    auxiliary = sum(terms)
+    if not torch.isfinite(auxiliary):
+        return False, f"non-finite structure loss: {float(auxiliary.detach())}"
+    head_parameters = [parameter for state in states for parameter in state.structure_head.parameters()]
+    gradients = torch.autograd.grad(auxiliary, head_parameters, retain_graph=True, allow_unused=True)
+    if not any(gradient is not None and torch.isfinite(gradient).all() and gradient.abs().sum() > 0
+               for gradient in gradients):
+        return False, "structure losses do not reach the dynamic path head"
+    return True, f"finite auxiliary={float(auxiliary.detach()):.5f}; gradients reach path head"
+
+
 def test_826_gradient_reachability(model, config_path, output):
     """Detect trainable CASP parameters that forward-only YAML checks miss.
 
@@ -676,8 +823,8 @@ def test_826_gradient_reachability(model, config_path, output):
     does not reach the loss graph. This specifically guards component-ablation
     YAMLs such as W07, where a disabled role must also remove its scalar gate.
     """
-    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments")) or output is None:
-        return True, "not an 8.26/8.27 config"
+    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments", "8.28-experiments")) or output is None:
+        return True, "not an 8.26/8.27/8.28 config"
 
     def tensors(value):
         if torch.is_tensor(value):
@@ -691,7 +838,9 @@ def test_826_gradient_reachability(model, config_path, output):
     output_tensors = [item for item in tensors(output) if item.requires_grad and item.is_floating_point()]
     if not output_tensors:
         return False, "training output has no differentiable tensors"
-    states = [m for m in model.modules() if m.__class__.__name__ == "EfficientCrackAlignedState"]
+    states = [m for m in model.modules() if m.__class__.__name__ in {
+        "EfficientCrackAlignedState", "SparseCrackPathState"
+    }]
     named_parameters = [
         (f"state[{index}].{name}", parameter)
         for index, state in enumerate(states)
@@ -749,6 +898,9 @@ def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
     ok, detail = test_827_structure(model, config_path)
     results.append(("8.27 CASP parameters", ok, detail or ""))
 
+    ok, detail = test_828_structure(model, config_path)
+    results.append(("8.28 sparse crack path", ok, detail or ""))
+
     # 2. Deepcopy
     ok, detail = test_deepcopy(model, device)
     results.append(("deepcopy (EMA)", ok, detail or ""))
@@ -759,6 +911,8 @@ def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
     if ok:
         cache_ok, cache_detail = test_live_aux_cache(model)
         results.append(("aux graph attached", cache_ok, cache_detail or ""))
+        aux_ok, aux_detail = test_828_structure_losses(model, config_path)
+        results.append(("8.28 structure losses", aux_ok, aux_detail or ""))
         reach_ok, reach_detail = test_826_gradient_reachability(model, config_path, train_output)
         results.append(("CASP gradient reach", reach_ok, reach_detail or ""))
 
@@ -803,11 +957,17 @@ def resolve_experiments(args):
         exp_ids.update(AUG26_EXPERIMENTS.keys())
     if args.aug27:
         exp_ids.update(AUG27_EXPERIMENTS.keys())
+    if args.aug28:
+        exp_ids.update(AUG28_EXPERIMENTS.keys())
     if args.experiments:
         for e in args.experiments:
             exp_ids.add(e)
     if args.phase:
         phase_map = {
+            "28F": ["Y00"],
+            "28S": ["Y01", "Y02", "Y03", "Y04", "Y05", "Y06"],
+            "28L": ["Y07", "Y08", "Y09", "Y10"],
+            "28M": ["Y11", "Y12", "Y13", "Y14", "Y15"],
             "27B": ["X00"],
             "27F": ["X01"],
             "27G": ["X02", "X03", "X04"],
@@ -863,7 +1023,8 @@ def parse_args():
     parser.add_argument("--aug24", action="store_true", help="Check the five corrected-H/V 8.24 experiments")
     parser.add_argument("--aug26", action="store_true", help="Check the eight true-YOLO11/CASP 8.26 experiments")
     parser.add_argument("--aug27", action="store_true", help="Check all fixed-full-CASP 8.27 parameter experiments")
-    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 27B 27F 27G 27O 27R 27D 27C, or legacy")
+    parser.add_argument("--aug28", action="store_true", help="Check all sparse dynamic crack-path 8.28 experiments")
+    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 28F 28S 28L 28M, 27B..., or legacy")
     parser.add_argument("--experiments", nargs="+", default=None, help="Experiment IDs: B0 S1 C2 ...")
     parser.add_argument("--exclude", nargs="+", default=None, help="IDs to exclude")
     parser.add_argument("--list", action="store_true", help="List available experiments")

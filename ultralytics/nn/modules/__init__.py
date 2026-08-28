@@ -88,6 +88,8 @@ from .mamba_yolo import (
     LastUnifiedCrackAwareVSSStage,
     EfficientCrackAlignedState,
     AdaptiveC3k2CASP,
+    SparseCrackPathState,
+    AdaptiveC3k2CrackPath,
     AdaptiveC2fCASP,
     CrackDetailStemLite,
     CrackDetailStemDirectional,
@@ -177,6 +179,8 @@ __all__ = (
     "CenteredCrackWriteVSSBlock", "LastCrackWriteVSSStage", "LastCenteredCrackWriteVSSStage",
     "CrackMemoryVSSBlock", "CrackStructureVSSBlock",
     "UnifiedCrackAwareVSSBlock", "CrackDetailStemLite", "CrackDetailStemDirectional",
-    "LastUnifiedCrackAwareVSSStage", "EfficientCrackAlignedState", "AdaptiveC3k2CASP", "AdaptiveC2fCASP",
+    "LastUnifiedCrackAwareVSSStage", "EfficientCrackAlignedState",
+    "AdaptiveC3k2CASP", "AdaptiveC2fCASP",
+    "SparseCrackPathState", "AdaptiveC3k2CrackPath",
     "CrackMergeLite", "CrackMergeDirectional"
 )

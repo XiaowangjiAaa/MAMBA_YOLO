@@ -11,5 +11,6 @@ Read the documents chronologically:
 7. [8.24 corrected H/V mapping and stability experiments](8.24_Q00_CORRECTED_HV_AND_STABILITY_EXPERIMENTS.md)
 8. [8.26 true YOLO11 efficient crack-aligned state propagation](8.26_EFFICIENT_YOLO11_CRACK_ALIGNED_STATE_PROPAGATION.md)
 9. [8.27 Mask-mAP50-driven full-CASP optimization](8.27_MASK_MAP50_DRIVEN_FULL_CASP_OPTIMIZATION.md)
+10. [8.28 Sparse adaptive crack-path Mamba](8.28_SPARSE_ADAPTIVE_CRACK_PATH_MAMBA.md)
 
-Current status: 8.26 exposed weak guidance learning and checkpoint-selection mismatch. The 8.27 X-series fixes the complete CASP method and optimizes its learning and capacity parameters with Mask mAP50 as the primary metric.
+Current status: 8.27 showed that probability guidance can help but fixed-family direction weighting does not realize the original crack-aligned scan objective. The 8.28 Y-series replaces it with sparse, image-adaptive curve tracing and path-level Mamba state propagation. All Y-series configs tune the complete method with Mask mAP50 as the primary metric.

@@ -259,6 +259,7 @@ class v8SegmentationLoss(v8DetectionLoss):
         self.guidance_loss_weight = float(model.yaml.get("guidance_loss_weight", 0.0))
         self.guidance_dice_weight = float(model.yaml.get("guidance_dice_weight", 1.0))
         self.orientation_loss_weight = float(model.yaml.get("orientation_loss_weight", 0.0))
+        self.connectivity_loss_weight = float(model.yaml.get("connectivity_loss_weight", 0.0))
         self.gate_regularization_weight = float(model.yaml.get("gate_regularization_weight", 0.0))
 
     def _union_mask(self, batch, batch_size):
@@ -322,6 +323,63 @@ class v8SegmentationLoss(v8DetectionLoss):
             return difference[valid].mean()
         return orientation.sum() * 0.0
 
+    @staticmethod
+    def _family_connectivity_target(target, output_size):
+        """Build H/V/main-diagonal/anti-diagonal neighbor targets."""
+        target = target[:, None]
+        if target.shape[-2:] != output_size:
+            if target.shape[-2] >= output_size[0] and target.shape[-1] >= output_size[1]:
+                target = F.adaptive_max_pool2d(target, output_size)
+            else:
+                target = F.interpolate(target, output_size, mode="nearest")
+        left = F.pad(target[..., :, :-1], (1, 0, 0, 0))
+        right = F.pad(target[..., :, 1:], (0, 1, 0, 0))
+        up = F.pad(target[..., :-1, :], (0, 0, 1, 0))
+        down = F.pad(target[..., 1:, :], (0, 0, 0, 1))
+        up_left = F.pad(target[..., :-1, :-1], (1, 0, 1, 0))
+        down_right = F.pad(target[..., 1:, 1:], (0, 1, 0, 1))
+        up_right = F.pad(target[..., :-1, 1:], (0, 1, 1, 0))
+        down_left = F.pad(target[..., 1:, :-1], (1, 0, 0, 1))
+        return torch.cat((
+            target * torch.maximum(left, right),
+            target * torch.maximum(up, down),
+            target * torch.maximum(up_left, down_right),
+            target * torch.maximum(up_right, down_left),
+        ), dim=1)
+
+    @classmethod
+    def _connectivity_guidance_loss(cls, connectivity, target):
+        """Supervise H/V/main-diagonal/anti-diagonal crack connectivity."""
+        edge_target = cls._family_connectivity_target(target, connectivity.shape[-2:])
+        with torch.cuda.amp.autocast(enabled=False):
+            probability = connectivity.float().clamp(1e-5, 1.0 - 1e-5)
+            edge_target = edge_target.float()
+            bce = F.binary_cross_entropy(probability, edge_target)
+            intersection = (probability * edge_target).sum(dim=(2, 3))
+            denominator = probability.sum(dim=(2, 3)) + edge_target.sum(dim=(2, 3))
+            dice = 1.0 - ((2.0 * intersection + 1.0) / (denominator + 1.0)).mean()
+        return bce + dice
+
+    @classmethod
+    def _semantic_tangent_loss(cls, orientation, target):
+        """Derive an undirected double-angle tangent from local mask connectivity.
+
+        Unlike a Sobel boundary normal, this target follows the crack centreline.
+        Ambiguous junction/interior pixels whose four family votes cancel are
+        excluded instead of forcing a wrong H/V label.
+        """
+        edge_target = cls._family_connectivity_target(target, orientation.shape[-2:]).float()
+        basis = edge_target.new_tensor(((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)))
+        tangent = torch.einsum("bfhw,fc->bchw", edge_target, basis)
+        magnitude = tangent.square().sum(dim=1, keepdim=True).sqrt()
+        valid = magnitude > 0.25
+        tangent = tangent / magnitude.clamp_min(1e-4)
+        prediction = F.normalize(orientation.float(), dim=1, eps=1e-4)
+        difference = 1.0 - (prediction * tangent).sum(dim=1, keepdim=True)
+        if valid.any():
+            return difference[valid].mean()
+        return orientation.sum() * 0.0
+
     def _structure_guidance_loss(self, batch, batch_size):
         auxiliary = torch.zeros((), device=self.device)
         if self.gate_regularization_weight > 0.0:
@@ -337,27 +395,34 @@ class v8SegmentationLoss(v8DetectionLoss):
             if gate_terms:
                 auxiliary = auxiliary + self.gate_regularization_weight * torch.stack(gate_terms).mean()
 
-        if self.guidance_loss_weight <= 0.0 and self.orientation_loss_weight <= 0.0:
+        if (self.guidance_loss_weight <= 0.0 and self.orientation_loss_weight <= 0.0
+                and self.connectivity_loss_weight <= 0.0):
             return auxiliary
         target = self._union_mask(batch, batch_size)
-        probability_losses, orientation_losses = [], []
+        probability_losses, orientation_losses, connectivity_losses = [], [], []
         for module in self.model.modules():
             guidance = getattr(module, "last_guidance", None)
             orientation = getattr(module, "last_orientation", None)
+            connectivity = getattr(module, "last_connectivity", None)
             if guidance is not None and self.guidance_loss_weight > 0.0:
                 probability_losses.append(
                     self._probability_guidance_loss(guidance, target, self.guidance_dice_weight)
                 )
             if orientation is not None and self.orientation_loss_weight > 0.0:
                 orientation_losses.append(
-                    self._orientation_guidance_loss(
+                    self._semantic_tangent_loss(orientation, target) if getattr(module, "semantic_structure", False)
+                    else self._orientation_guidance_loss(
                         orientation, target, family_logits=getattr(module, "orientation_family_logits", False)
                     )
                 )
+            if connectivity is not None and self.connectivity_loss_weight > 0.0:
+                connectivity_losses.append(self._connectivity_guidance_loss(connectivity, target))
         if probability_losses:
             auxiliary = auxiliary + self.guidance_loss_weight * torch.stack(probability_losses).mean()
         if orientation_losses:
             auxiliary = auxiliary + self.orientation_loss_weight * torch.stack(orientation_losses).mean()
+        if connectivity_losses:
+            auxiliary = auxiliary + self.connectivity_loss_weight * torch.stack(connectivity_losses).mean()
         return auxiliary
 
     def __call__(self, preds, batch):

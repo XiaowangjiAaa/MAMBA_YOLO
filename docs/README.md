@@ -5,4 +5,4 @@
 
 The dated documents preserve the evolution of the crack-aware Scan/Memory design. Later documents supersede earlier recommendations when results conflict.
 
-Current redesign: [8.27 Mask-mAP50-driven Full-CASP Optimization](experiments/8.27_MASK_MAP50_DRIVEN_FULL_CASP_OPTIMIZATION.md).
+Current redesign: [8.28 Sparse Adaptive Crack-Path Mamba](experiments/8.28_SPARSE_ADAPTIVE_CRACK_PATH_MAMBA.md).

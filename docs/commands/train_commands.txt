@@ -227,3 +227,16 @@ python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 27C --seeds 0 -
 
 # Primary final checkpoint.
 python mbyolo_train.py --task val --weights output_dir/crack-seg-8.27/X01_crack-seg_seed0/weights/best_map50.pt --data ../crack-seg/crack-seg.yaml --device 0 --batch_size 16 --imgsz 640 --crack_metric_conf 0.25 --cldice_iters 20
+
+## 8.28 Sparse adaptive crack-path Mamba
+
+# Validate the complete dynamic-path configs.
+python check_yaml.py --aug28 --quick --device cuda:0
+
+# Run reference, path geometry, structure learning and memory tuning in order.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28F --seeds 0 --skip-completed
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28S --seeds 0 --skip-completed --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28L 28M --seeds 0 --skip-completed --continue-on-error
+
+# Single experiment example.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Y00 --seeds 0

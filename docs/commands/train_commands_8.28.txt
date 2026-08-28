@@ -1,0 +1,32 @@
+# 8.28 Sparse Adaptive Crack-Path Mamba
+# Primary metric: saved-checkpoint Mask mAP50.
+
+# 1. Preflight all full-module parameter configs on the real CUDA selective scan.
+python check_yaml.py --aug28 --quick --device cuda:0
+
+# CPU graph/shape fallback only; never train with the stub.
+python check_yaml.py --aug28 --quick --device cpu --imgsz 128 --stub-scan
+
+# 2. Train the complete reference first.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28F --seeds 0 --device 0,1 --batch-size 16 --epochs 300 --patience 100 --skip-completed
+
+# 3. Tune token budget, dynamic path length and continuation confidence.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28S --seeds 0 --device 0,1 --batch-size 16 --epochs 300 --patience 100 --skip-completed --continue-on-error
+
+# 4. Tune probability/tangent/connectivity learning.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28L --seeds 0 --device 0,1 --batch-size 16 --epochs 300 --patience 100 --skip-completed --continue-on-error
+
+# 5. Tune route and Mamba memory strengths.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28M --seeds 0 --device 0,1 --batch-size 16 --epochs 300 --patience 100 --skip-completed --continue-on-error
+
+# Train only one chosen experiment.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Y00 --seeds 0 --device 0,1 --batch-size 16 --epochs 300 --patience 100
+
+# After seed-0 selection, use this form for the reference/top candidates only.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Y00 YXX YYY --seeds 1 2 --device 0,1 --batch-size 16 --epochs 300 --patience 100 --skip-completed --continue-on-error
+
+# Dry-run command expansion without training.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28F 28S 28L 28M --seeds 0 --dry-run
+
+# Visualize P3/P4 response, crack probability, tangent/connectivity and traced paths.
+python visualize_model_features.py --model ultralytics/cfg/models/11/8.28-experiments/Y00-crack-path-reference.yaml --weights output_dir/crack-seg-8.28/Y00_crack-seg_seed0/weights/best_map50.pt --source path/to/crack.jpg --layers 4,6 --output feature_visualization/Y00
