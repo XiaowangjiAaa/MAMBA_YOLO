@@ -387,12 +387,8 @@ def parse_epoch_progress(line, total_epochs):
     return None
 
 
-def build_cmd(exp_name, exp_info, args):
-    config_path = CONFIG_DIR / exp_info["config"]
-    if not config_path.exists():
-        print(f"  [WARN] Config not found: {config_path}")
-        return None
-
+def get_run_location(exp_name, args):
+    """Return the absolute project directory and stable run name for an experiment/seed."""
     if exp_name in AUG28_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.28"
     elif exp_name in AUG27_EXPERIMENTS:
@@ -414,7 +410,93 @@ def build_cmd(exp_name, exp_info, args):
     else:
         default_project = f"./output_dir/{args.data_stem}"
     project_dir = args.project if args.project else default_project
+    project_path = Path(project_dir).expanduser()
+    if not project_path.is_absolute():
+        project_path = ROOT / project_path
+    project_path = project_path.resolve()
     name = f"{exp_name}_{args.data_stem}_seed{args.seed}"
+    return project_path, name
+
+
+def find_run_directories(exp_name, args):
+    """Find the canonical run and any Ultralytics incremented copies (name2, name3, ...)."""
+    project_path, name = get_run_location(exp_name, args)
+    if not project_path.is_dir():
+        return []
+    pattern = re.compile(rf"^{re.escape(name)}(?:\d+)?$")
+    candidates = [path for path in project_path.iterdir() if path.is_dir() and pattern.fullmatch(path.name)]
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def completed_artifact(exp_name, args):
+    """Return evidence of a completed run independent of batch_train_status.json."""
+    for run_dir in find_run_directories(exp_name, args):
+        marker = run_dir / ".batch_completed.json"
+        if marker.is_file():
+            try:
+                with open(marker, "r", encoding="utf-8") as stream:
+                    record = json.load(stream)
+                if record.get("experiment") == exp_name and record.get("seed") == args.seed:
+                    return marker
+            except (OSError, ValueError, TypeError):
+                # A damaged marker must never hide an incomplete experiment.
+                pass
+
+        # Backward-compatible evidence for full-length historical runs. A
+        # best/last checkpoint alone is insufficient because interrupted runs
+        # also contain both files.
+        results = run_dir / "results.csv"
+        last = run_dir / "weights" / "last.pt"
+        if results.is_file() and last.is_file():
+            with open(results, "r", encoding="utf-8", errors="replace") as stream:
+                completed_epochs = max(sum(1 for line in stream if line.strip()) - 1, 0)
+            if completed_epochs >= args.epochs:
+                return results
+    return None
+
+
+def find_resume_checkpoint(exp_name, args):
+    """Return the newest usable last.pt or periodic epoch checkpoint."""
+    checkpoints = []
+    for run_dir in find_run_directories(exp_name, args):
+        weights_dir = run_dir / "weights"
+        if not weights_dir.is_dir():
+            continue
+        for checkpoint in (weights_dir / "last.pt", *weights_dir.glob("epoch*.pt")):
+            if checkpoint.is_file() and checkpoint.stat().st_size > 0:
+                checkpoints.append(checkpoint)
+    return max(checkpoints, key=lambda path: path.stat().st_mtime) if checkpoints else None
+
+
+def write_completion_marker(exp_name, args):
+    """Persist artifact-level completion evidence beside the training outputs."""
+    newest_checkpoint = find_resume_checkpoint(exp_name, args)
+    if newest_checkpoint is not None:
+        run_dir = newest_checkpoint.parent.parent
+    else:
+        run_dirs = find_run_directories(exp_name, args)
+        run_dir = run_dirs[0] if run_dirs else None
+    if run_dir is None:
+        return None
+    marker = run_dir / ".batch_completed.json"
+    payload = {
+        "experiment": exp_name,
+        "seed": args.seed,
+        "epochs_requested": args.epochs,
+        "completed_at": datetime.now().isoformat(),
+    }
+    with open(marker, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, indent=2)
+    return marker
+
+
+def build_cmd(exp_name, exp_info, args, resume_checkpoint=None):
+    config_path = CONFIG_DIR / exp_info["config"]
+    if not config_path.exists():
+        print(f"  [WARN] Config not found: {config_path}")
+        return None
+
+    project_path, name = get_run_location(exp_name, args)
     patience = max(args.patience, exp_info.get("patience", 0))
 
     cmd_parts = [
@@ -432,14 +514,16 @@ def build_cmd(exp_name, exp_info, args):
         "--batch_size", str(args.batch_size),
         "--workers", str(args.workers),
         "--optimizer", args.optimizer,
-        "--project", project_dir,
+        "--project", str(project_path),
         "--name", name,
     ]
     if args.amp:
         cmd_parts.append("--amp")
     if args.half:
         cmd_parts.append("--half")
-    if args.weights:
+    if resume_checkpoint is not None:
+        cmd_parts += ["--resume", str(resume_checkpoint)]
+    elif args.weights:
         cmd_parts += ["--weights", args.weights]
     if args.imgsz:
         cmd_parts += ["--imgsz", str(args.imgsz)]
@@ -470,6 +554,8 @@ def run_experiments(experiment_ids, args):
     print(f"  Console: {'verbose' if args.verbose else 'concise (ETA only)'}")
     if args.skip_completed:
         print(f"  Mode:   skip completed experiments")
+    if args.resume_interrupted:
+        print(f"  Resume: automatically use the newest incomplete last.pt")
     print("=" * 70)
 
     for idx, exp_id in enumerate(experiment_ids, 1):
@@ -482,17 +568,32 @@ def run_experiments(experiment_ids, args):
         config = exp_info["config"]
         desc = exp_info["desc"]
 
-        # Check if already completed
+        # Completion is tracked both centrally and beside the run artifacts so
+        # copying an output directory does not lose skip information.
         run_id = f"{exp_id}:seed{args.seed}"
-        if args.skip_completed and status.get(run_id) == "completed":
-            print(f"\n[{idx}/{total}] {exp_id} ({config}) - already COMPLETED, skipping.")
+        artifact = completed_artifact(exp_id, args)
+        existing_checkpoint = find_resume_checkpoint(exp_id, args)
+        status_completed = status.get(run_id) == "completed" and existing_checkpoint is not None
+        is_completed = status_completed or artifact is not None
+        if artifact is not None and status.get(run_id) != "completed":
+            status[run_id] = "completed"
+            save_status(status)
+        if args.skip_completed and is_completed:
+            evidence = f"artifact={artifact}" if artifact is not None else "batch status"
+            print(f"\n[{idx}/{total}] {exp_id} ({config}) - already COMPLETED ({evidence}), skipping.")
             skipped += 1
             continue
 
         print(f"\n[{idx}/{total}] {exp_id} ({config})")
         print(f"  Description: {desc}")
 
-        cmd = build_cmd(exp_id, exp_info, args)
+        resume_checkpoint = None
+        if args.resume_interrupted and not is_completed:
+            resume_checkpoint = existing_checkpoint
+            if resume_checkpoint is not None:
+                print(f"  Resume: {resume_checkpoint}")
+
+        cmd = build_cmd(exp_id, exp_info, args, resume_checkpoint=resume_checkpoint)
         if cmd is None:
             status[run_id] = "failed"
             failed += 1
@@ -559,8 +660,11 @@ def run_experiments(experiment_ids, args):
 
                 if process.returncode == 0:
                     status[run_id] = "completed"
+                    marker = write_completion_marker(exp_id, args)
                     passed += 1
                     print(f"  [OK] {exp_id} completed in {elapsed_str}")
+                    if marker is not None:
+                        print(f"  Completion marker: {marker}")
                     lf.write(f"\n[OK] Completed in {elapsed_str}\n")
                 else:
                     status[run_id] = "failed"
@@ -714,8 +818,14 @@ Usage examples:
 
     # Run control
     ctrl_group = parser.add_argument_group("Run control")
-    ctrl_group.add_argument("--skip-completed", action="store_true",
-                            help="Skip experiments marked as completed in status file")
+    ctrl_group.add_argument("--skip-completed", dest="skip_completed", action="store_true", default=True,
+                            help="Skip completed experiments (default: enabled; checks status and output artifacts)")
+    ctrl_group.add_argument("--no-skip-completed", dest="skip_completed", action="store_false",
+                            help="Run a completed experiment again as a new run")
+    ctrl_group.add_argument("--resume-interrupted", dest="resume_interrupted", action="store_true", default=True,
+                            help="Resume the newest last.pt for an incomplete experiment (default: enabled)")
+    ctrl_group.add_argument("--no-resume-interrupted", dest="resume_interrupted", action="store_false",
+                            help="Ignore existing last.pt and start an incomplete experiment from scratch")
     ctrl_group.add_argument("--continue-on-error", action="store_true",
                             help="Continue to next experiment even if current one fails")
     ctrl_group.add_argument("--dry-run", action="store_true",
@@ -728,19 +838,29 @@ Usage examples:
 
 def resolve_experiments(args):
     exp_ids = set()
-    use_all = False
 
     if args.experiments:
-        for e in args.experiments:
-            exp_ids.add(e)
+        unknown_experiments = sorted(set(args.experiments) - set(ALL_EXPERIMENTS))
+        if unknown_experiments:
+            raise ValueError(
+                f"Unknown experiment ID(s): {', '.join(unknown_experiments)}. "
+                "Use --list to inspect valid IDs."
+            )
+        exp_ids.update(args.experiments)
     if args.phase:
+        available_phases = {str(info["phase"]) for info in ALL_EXPERIMENTS.values()}
+        unknown_phases = sorted(set(args.phase) - available_phases)
+        if unknown_phases:
+            raise ValueError(
+                f"Unknown phase(s): {', '.join(unknown_phases)}. "
+                f"Available phases: {', '.join(sorted(available_phases))}."
+            )
         for p in args.phase:
             for eid, info in ALL_EXPERIMENTS.items():
                 if str(info["phase"]) == p:
                     exp_ids.add(eid)
-    if not exp_ids and not args.list:
+    if not exp_ids and not args.list and not args.experiments and not args.phase:
         # Default: run the current 8.28 full crack-path parameter-search set.
-        use_all = True
         exp_ids = set(AUG28_EXPERIMENTS.keys())
 
     if args.exclude:
@@ -776,7 +896,11 @@ def main():
 
     args.data_stem = Path(args.data).stem
 
-    experiment_ids = resolve_experiments(args)
+    try:
+        experiment_ids = resolve_experiments(args)
+    except ValueError as error:
+        print(f"[ERROR] {error}")
+        sys.exit(2)
 
     if not experiment_ids:
         print("[ERROR] No experiments selected.")
@@ -784,6 +908,7 @@ def main():
 
     if args.dry_run:
         print("=== DRY RUN ===")
+        status = load_status()
         for seed in args.seeds:
             args.seed = seed
             for exp_id in experiment_ids:
@@ -791,7 +916,20 @@ def main():
                     print(f"  {exp_id}: UNKNOWN")
                     continue
                 exp_info = ALL_EXPERIMENTS[exp_id]
-                cmd = build_cmd(exp_id, exp_info, args)
+                run_id = f"{exp_id}:seed{seed}"
+                artifact = completed_artifact(exp_id, args)
+                existing_checkpoint = find_resume_checkpoint(exp_id, args)
+                status_completed = status.get(run_id) == "completed" and existing_checkpoint is not None
+                is_completed = status_completed or artifact is not None
+                if args.skip_completed and is_completed:
+                    evidence = f"artifact={artifact}" if artifact is not None else "batch status"
+                    print(f"  {exp_id}/seed{seed}: SKIP completed ({evidence})")
+                    continue
+                resume_checkpoint = (
+                    existing_checkpoint
+                    if args.resume_interrupted and not is_completed else None
+                )
+                cmd = build_cmd(exp_id, exp_info, args, resume_checkpoint=resume_checkpoint)
                 if cmd:
                     print(f"  {exp_id}/seed{seed}: {' '.join(cmd)}")
                 else:

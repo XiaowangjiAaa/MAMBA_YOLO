@@ -28,5 +28,14 @@ python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Y00 YXX Y
 # Dry-run command expansion without training.
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28F 28S 28L 28M --seeds 0 --dry-run
 
+# Recovery policy (enabled by default):
+# 1) completed runs are skipped using batch_train_status.json or .batch_completed.json;
+# 2) incomplete runs resume from the newest last.pt, falling back to epoch*.pt;
+# 3) use --dry-run first to see SKIP or --resume without launching training.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28F --seeds 0 --dry-run
+
+# Deliberately retrain a completed/incomplete experiment from scratch.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Y00 --seeds 0 --no-skip-completed --no-resume-interrupted
+
 # Visualize P3/P4 response, crack probability, tangent/connectivity and traced paths.
 python visualize_model_features.py --model ultralytics/cfg/models/11/8.28-experiments/Y00-crack-path-reference.yaml --weights output_dir/crack-seg-8.28/Y00_crack-seg_seed0/weights/best_map50.pt --source path/to/crack.jpg --layers 4,6 --output feature_visualization/Y00

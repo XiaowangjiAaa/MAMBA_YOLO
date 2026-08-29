@@ -17,6 +17,8 @@ def parse_opt():
                         help='model config YAML path. Use Mamba-YOLO-T-yolo11.yaml for YOLO11-based, '
                              'or Mamba-YOLO-T.yaml for original YOLOv8-based')
     parser.add_argument('--weights', type=str, default='', help='trained .pth / .pt weights file (for val/test/predict)')
+    parser.add_argument('--resume', type=str, default='',
+                        help='resume interrupted training from a last.pt checkpoint (restores optimizer/epoch/EMA)')
     parser.add_argument('--batch_size', type=int, default=512, help='batch size')
     parser.add_argument('--imgsz', '--img', '--img-size', type=int, default=640, help='inference size (pixels)')
     parser.add_argument('--task', default='train', help='train, val, test, speed or study')
@@ -99,8 +101,22 @@ if __name__ == '__main__':
         "name": opt.name,
     }
 
-    # --- Load model: from weights (preserving original nc) or from YAML ---
-    if opt.weights:
+    # --- Load model: resume checkpoint, ordinary weights, or YAML ---
+    if opt.resume:
+        if task != 'train':
+            raise ValueError('--resume is only valid with --task train')
+        if opt.weights:
+            raise ValueError('--resume and --weights are mutually exclusive')
+        if not os.path.isfile(opt.resume):
+            raise FileNotFoundError(f'Resume checkpoint not found: {opt.resume}')
+        print(f"[INFO] Resuming full training state from: {opt.resume}")
+        # Let the checkpoint infer its model task (segment/detect); ``task`` here
+        # is the execution mode "train", not an Ultralytics model-task name.
+        model = _load_model_from_weights(opt.resume, task=None)
+        # YOLO.train converts this flag to the checkpoint path held by ``model``.
+        # BaseTrainer then restores optimizer, scheduler, EMA, epoch and best metrics.
+        args['resume'] = True
+    elif opt.weights:
         model = _load_model_from_weights(opt.weights, task=task)
         # Override nc if user specified (must match checkpoint)
         if opt.nc is not None:
