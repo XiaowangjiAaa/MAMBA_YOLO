@@ -1243,28 +1243,37 @@ class CrackPathSelectiveSSM(nn.Module):
         return self.write_max * self.write_raw.sigmoid()
 
     def _selective_recurrence(self, xs, dts, Bs, Cs):
-        """Reference selective SSM for NKCL tensors, stable for very short L."""
+        """Parallel FP32 selective SSM for short NKCL crack paths.
+
+        For h_t = a_t * h_(t-1) + u_t and h_(-1) = 0, the complete state
+        sequence is p_t * cumsum(u_t / p_t), where p_t = cumprod(a_t).
+        This is algebraically identical to the token loop but launches a small
+        fixed set of GPU kernels instead of one autograd graph per path step.
+        Crack paths are deliberately short, so their cumulative decay remains
+        safely away from FP32 underflow.
+        """
         path_batch, scans, channels, length = xs.shape
         state_size = Bs.shape[2]
         A = -torch.exp(self.A_logs.float()).view(scans, channels, state_size)
         D = self.Ds.float().view(scans, channels)
         dt_bias = self.dt_projs_bias.float().view(scans, channels)
-        state = xs.new_zeros((path_batch, scans, channels, state_size), dtype=torch.float32)
-        outputs = []
 
         x32, dt32, B32, C32 = xs.float(), dts.float(), Bs.float(), Cs.float()
-        for step in range(length):
-            delta = F.softplus(dt32[..., step] + dt_bias[None])
-            decay = torch.exp(delta[..., None] * A[None])
-            write = (
-                delta[..., None]
-                * B32[:, :, None, :, step]
-                * x32[..., step, None]
-            )
-            state = decay * state + write
-            read = (state * C32[:, :, None, :, step]).sum(dim=-1)
-            outputs.append(read + D[None] * x32[..., step])
-        return torch.stack(outputs, dim=-1)
+        delta = F.softplus(dt32 + dt_bias[None, ..., None])
+        decay = torch.exp(delta[:, :, :, None, :] * A[None, ..., None])
+        write = (
+            delta[:, :, :, None, :]
+            * B32[:, :, None, :, :]
+            * x32[:, :, :, None, :]
+        )
+        decay_prefix = torch.cumprod(decay, dim=-1)
+        # The clamp is inactive in the intended short-path regime and protects
+        # deliberately extreme parameter sweeps from division by zero.
+        state_sequence = decay_prefix * torch.cumsum(
+            write / decay_prefix.clamp_min(1e-20), dim=-1
+        )
+        read = (state_sequence * C32[:, :, None, :, :]).sum(dim=3)
+        return read + D[None, ..., None] * x32
 
     def forward(self, x, probability, predecessor, valid_mask):
         """Scan N paths with tensors shaped x=NCL and guidance=N1L."""
