@@ -566,25 +566,47 @@ class BaseTrainer:
         if not torch.isfinite(grad_norm):
             skipped = getattr(self, "nonfinite_optimizer_steps", 0) + 1
             self.nonfinite_optimizer_steps = skipped
+            bad_parameters = [
+                name for name, parameter in self.model.named_parameters()
+                if parameter.grad is not None and not torch.isfinite(parameter.grad).all()
+            ]
             # Enabled GradScaler inspects the already-unscaled gradients and
             # skips optimizer.step while reducing its scale. Without AMP we must
             # explicitly avoid applying non-finite gradients.
+            old_scale = float(self.scaler.get_scale())
             if self.scaler.is_enabled():
                 self.scaler.step(self.optimizer)
             self.scaler.update()
+            new_scale = float(self.scaler.get_scale())
             self.optimizer.zero_grad()
             if RANK in {-1, 0} and (skipped == 1 or skipped % 4 == 0):
+                bad_summary = ", ".join(bad_parameters[:8]) or "unknown"
+                if len(bad_parameters) > 8:
+                    bad_summary += f", ... (+{len(bad_parameters) - 8})"
                 LOGGER.warning(
                     f"WARNING ⚠️ non-finite gradient norm; optimizer step skipped "
-                    f"({skipped} consecutive step(s), AMP scale={self.scaler.get_scale():g})."
+                    f"({skipped} consecutive step(s), AMP scale={old_scale:g}->{new_scale:g}). "
+                    f"Affected parameter(s): {bad_summary}"
                 )
-            if skipped >= 8:
+            # GradScaler commonly needs more than eight startup backoffs from its
+            # default 65536 scale on a new architecture. Do not mistake that
+            # healthy scale search for a persistent NaN. Abort only after AMP has
+            # reached unit scale and still fails repeatedly, while retaining a
+            # hard upper bound for scale-independent NaNs.
+            unit_scale_failures = (
+                getattr(self, "nonfinite_unit_scale_steps", 0) + 1 if new_scale <= 1.0 else 0
+            )
+            self.nonfinite_unit_scale_steps = unit_scale_failures
+            if not self.scaler.is_enabled() or unit_scale_failures >= 4 or skipped >= 32:
                 raise FloatingPointError(
-                    "Eight consecutive optimizer steps had non-finite gradients. "
-                    "Training was stopped to prevent a silent zero-learning run."
+                    f"Persistent non-finite gradients after {skipped} consecutive optimizer steps "
+                    f"(AMP scale={new_scale:g}; affected parameters: "
+                    f"{', '.join(bad_parameters[:12]) or 'unknown'}). Training was stopped to "
+                    "prevent a silent zero-learning run."
                 )
             return
         self.nonfinite_optimizer_steps = 0
+        self.nonfinite_unit_scale_steps = 0
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad()

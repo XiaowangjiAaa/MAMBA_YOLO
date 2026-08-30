@@ -5,6 +5,7 @@ import argparse
 import time
 import json
 import re
+from collections import deque
 from pathlib import Path
 from datetime import datetime
 
@@ -628,9 +629,13 @@ def run_experiments(experiment_ids, args):
                 )
 
                 last_epoch = 0
+                # Keep the subprocess tail in memory so concise mode still exposes
+                # the real traceback instead of reporting only an opaque exit code.
+                output_tail = deque(maxlen=60)
                 for line in process.stdout:
                     lf.write(line)
                     lf.flush()
+                    output_tail.append(line.rstrip("\r\n"))
 
                     if args.verbose:
                         sys.stdout.write(line)
@@ -670,6 +675,11 @@ def run_experiments(experiment_ids, args):
                     status[run_id] = "failed"
                     failed += 1
                     print(f"  [FAIL] {exp_id} failed with code {process.returncode} ({elapsed_str})")
+                    if not args.verbose and output_tail:
+                        print("\n  Last training log lines:")
+                        for tail_line in output_tail:
+                            print(f"    {tail_line}")
+                        print(f"\n  Full log: {log_file}")
                     lf.write(f"\n[FAIL] Exit code: {process.returncode} ({elapsed_str})\n")
                     if not args.continue_on_error:
                         save_status(status)
