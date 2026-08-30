@@ -299,15 +299,41 @@ def test_forward(model, device, nc=1, imgsz=640):
 
 
 def test_amp_forward(model, device):
-    """Test forward pass with AMP autocast."""
+    """Test AMP forward and numerical backward through custom state modules."""
     model = model.to(device).train()
     batch = torch.randn(2, 3, 640, 640, device=device)
     try:
         with torch.cuda.amp.autocast(enabled=True):
-            _ = model(batch)
+            output = model(batch)
+
+        def tensors(value):
+            if torch.is_tensor(value):
+                return [value]
+            if isinstance(value, dict):
+                return [item for child in value.values() for item in tensors(child)]
+            if isinstance(value, (list, tuple)):
+                return [item for child in value for item in tensors(child)]
+            return []
+
+        scalar = sum(item.float().mean() for item in tensors(output) if item.requires_grad)
+        state_named_parameters = [
+            (f"{module.__class__.__name__}.{name}", parameter) for module in model.modules()
+            if module.__class__.__name__ in {"EfficientCrackAlignedState", "SparseCrackPathState"}
+            for name, parameter in module.named_parameters() if parameter.requires_grad
+        ]
+        if state_named_parameters:
+            gradients = torch.autograd.grad(
+                scalar, [parameter for _, parameter in state_named_parameters], allow_unused=True
+            )
+            nonfinite = [name for (name, _), gradient in zip(state_named_parameters, gradients)
+                         if gradient is not None and not torch.isfinite(gradient).all()]
+            if nonfinite:
+                preview = ", ".join(nonfinite[:8])
+                suffix = f" (+{len(nonfinite) - 8} more)" if len(nonfinite) > 8 else ""
+                return False, f"AMP backward non-finite: {preview}{suffix}"
     except Exception as e:
-        return False, f"AMP forward: {e}"
-    return True, None
+        return False, f"AMP forward/backward: {e}"
+    return True, "finite AMP state backward"
 
 
 def test_loss_computation(model, device, nc=1, imgsz=640):
@@ -674,6 +700,8 @@ def test_828_structure(model, config_path):
         return False, f"expected two SparseCrackPathState cores, got {len(states)}"
     if any(m.structure_head[-1].out_channels != 7 for m in states):
         return False, "structure head must predict p + double-angle tangent + four connectivity families"
+    if any(torch.count_nonzero(m.state_out.weight.detach()).item() != 0 for m in states):
+        return False, "8.28 state_out must be zero-initialized for an exact safe C3k2 start"
     if any(m.max_paths != 128 or m.state_ratio != 0.25 for m in states):
         return False, "8.28 fixes max_paths=128 and state_ratio=0.25"
 
@@ -854,11 +882,24 @@ def test_826_gradient_reachability(model, config_path, output):
         scalar, [parameter for _, parameter in named_parameters], retain_graph=True, allow_unused=True
     )
     unused = [name for (name, _), gradient in zip(named_parameters, gradients) if gradient is None]
+    if "8.28-experiments" in str(config_path):
+        # Sparse path geometry is deliberately detached from the detection graph
+        # because top-k/argmax/atan2 define a hard routing policy. Its structure
+        # head is connected by the explicit probability/tangent/connectivity
+        # losses tested immediately above, so it need not reach this output-only
+        # probe a second time.
+        unused = [name for name in unused if ".structure_head." not in name]
     if unused:
         preview = ", ".join(unused[:8])
         suffix = f" (+{len(unused) - 8} more)" if len(unused) > 8 else ""
         return False, f"DDP-unused CASP parameter(s): {preview}{suffix}"
-    return True, f"all {len(named_parameters)} CASP parameter tensors reach the training graph"
+    nonfinite = [name for (name, _), gradient in zip(named_parameters, gradients)
+                 if gradient is not None and not torch.isfinite(gradient).all()]
+    if nonfinite:
+        preview = ", ".join(nonfinite[:8])
+        suffix = f" (+{len(nonfinite) - 8} more)" if len(nonfinite) > 8 else ""
+        return False, f"non-finite CASP gradient(s): {preview}{suffix}"
+    return True, f"all {len(named_parameters)} CASP gradients are connected and finite"
 
 
 def validate_config(config_path, device, nc=1, imgsz=640, quick=False):

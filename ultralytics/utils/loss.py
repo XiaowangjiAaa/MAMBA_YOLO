@@ -374,8 +374,13 @@ class v8SegmentationLoss(v8DetectionLoss):
         magnitude = tangent.square().sum(dim=1, keepdim=True).sqrt()
         valid = magnitude > 0.25
         tangent = tangent / magnitude.clamp_min(1e-4)
-        prediction = F.normalize(orientation.float(), dim=1, eps=1e-4)
-        difference = 1.0 - (prediction * tangent).sum(dim=1, keepdim=True)
+        # Direct regression avoids the 1/||orientation|| gradient singularity of
+        # F.normalize near the zero-initialized structure head. Under AMP that
+        # singularity can repeatedly overflow and make GradScaler skip every
+        # optimizer step while the reported forward loss remains finite.
+        difference = F.smooth_l1_loss(
+            orientation.float(), tangent, reduction="none"
+        ).mean(dim=1, keepdim=True)
         if valid.any():
             return difference[valid].mean()
         return orientation.sum() * 0.0

@@ -1187,7 +1187,15 @@ class AdaptiveC2fCASP(AdaptiveC3k2CASP):
 
 
 class CrackPathSelectiveSSM(nn.Module):
-    """Bidirectional selective state scan over already ordered crack paths."""
+    """Bidirectional selective recurrence over short, already ordered crack paths.
+
+    Crack paths contain only a few tokens but are packed into a very large
+    effective batch (image_batch * path_count). The CUDA image-scan kernel was
+    designed for the opposite regime and produced non-finite backward values in
+    AMP training without making the forward loss NaN. A direct FP32 recurrence is
+    both cheaper for these short paths and preserves the same input-dependent
+    Delta/B/C state-space update.
+    """
 
     def __init__(self, channels, d_state=8, memory_init=0.05, memory_max=0.5,
                  transition_init=0.05, transition_max=0.5,
@@ -1234,6 +1242,30 @@ class CrackPathSelectiveSSM(nn.Module):
     def effective_write(self):
         return self.write_max * self.write_raw.sigmoid()
 
+    def _selective_recurrence(self, xs, dts, Bs, Cs):
+        """Reference selective SSM for NKCL tensors, stable for very short L."""
+        path_batch, scans, channels, length = xs.shape
+        state_size = Bs.shape[2]
+        A = -torch.exp(self.A_logs.float()).view(scans, channels, state_size)
+        D = self.Ds.float().view(scans, channels)
+        dt_bias = self.dt_projs_bias.float().view(scans, channels)
+        state = xs.new_zeros((path_batch, scans, channels, state_size), dtype=torch.float32)
+        outputs = []
+
+        x32, dt32, B32, C32 = xs.float(), dts.float(), Bs.float(), Cs.float()
+        for step in range(length):
+            delta = F.softplus(dt32[..., step] + dt_bias[None])
+            decay = torch.exp(delta[..., None] * A[None])
+            write = (
+                delta[..., None]
+                * B32[:, :, None, :, step]
+                * x32[..., step, None]
+            )
+            state = decay * state + write
+            read = (state * C32[:, :, None, :, step]).sum(dim=-1)
+            outputs.append(read + D[None] * x32[..., step])
+        return torch.stack(outputs, dim=-1)
+
     def forward(self, x, probability, predecessor, valid_mask):
         """Scan N paths with tensors shaped x=NCL and guidance=N1L."""
         path_batch, channels, length = x.shape
@@ -1255,18 +1287,8 @@ class CrackPathSelectiveSSM(nn.Module):
         dts = dts + self.effective_transition().to(dts.dtype) * (1.0 - cs.to(dts.dtype))
         Bs = Bs * (1.0 + self.effective_write().to(Bs.dtype) * (2.0 * ps.to(Bs.dtype) - 1.0))
 
-        flat_x = xs.reshape(path_batch, self.K * channels, length).contiguous()
-        flat_dt = dts.reshape(path_batch, self.K * channels, length).contiguous()
-        output_dtype = flat_x.dtype
-        # Match SS2D's stable training path and the CUDA core's expected fp32
-        # recurrence under AMP. Gradients are cast back through these conversions.
-        scan_x = flat_x.float()
-        scan_dt = flat_dt.float()
-        As = -torch.exp(self.A_logs.float())
-        ys = SelectiveScanCore.apply(
-            scan_x, scan_dt, As, Bs.float().contiguous(), Cs.float().contiguous(), self.Ds.float(),
-            self.dt_projs_bias.reshape(-1).float(), True, 1, 1, True
-        ).view(path_batch, self.K, channels, length).to(output_dtype)
+        output_dtype = xs.dtype
+        ys = self._selective_recurrence(xs, dts, Bs, Cs).to(output_dtype)
         merged = 0.5 * (ys[:, 0] + ys[:, 1].flip(-1))
         merged = self.norm(merged.transpose(1, 2)).transpose(1, 2).contiguous()
         return self.out_proj(merged) * valid_mask.to(merged.dtype)
@@ -1323,6 +1345,10 @@ class SparseCrackPathState(nn.Module):
             transition_init, transition_max, write_init, write_max
         )
         self.state_out = nn.Conv2d(self.state_channels, channels, kernel_size=1, bias=False)
+        # ReZero-style safe start: the new block is exactly the local YOLO C3k2
+        # path at initialization. The projection learns first, then gradually
+        # exposes the crack-path state without corrupting early backbone features.
+        nn.init.zeros_(self.state_out.weight)
         route_ratio = route_init / route_max
         self.route_raw = nn.Parameter(torch.tensor(math.log(route_ratio / (1.0 - route_ratio))))
         self.route_raw._no_weight_decay = True
@@ -1467,8 +1493,16 @@ class SparseCrackPathState(nn.Module):
         self.visual_orientation = orientation.detach()
         self.visual_connectivity = connectivity.detach()
 
+        # Top-k, argmax direction selection and thresholded continuation form a
+        # hard routing policy. Differentiating through its atan2/sqrt scores is
+        # neither meaningful (the selected indices are discrete) nor AMP-safe:
+        # near-zero FP16 orientation vectors make atan2 derivatives singular and
+        # can yield 0 * Inf = NaN even behind a zero-initialized residual. The
+        # structure head is trained explicitly by probability/tangent/connectivity
+        # losses, while detection gradients still train gathered path features,
+        # the selective recurrence and the residual projection.
         path_feature, path_probability, predecessor, valid_mask, indices = self._build_paths(
-            compact, probability, orientation, connectivity
+            compact, probability.detach(), orientation.detach(), connectivity.detach()
         )
         path_output = self.path_ssm(path_feature, path_probability, predecessor, valid_mask)
         batch, _, height, width = compact.shape

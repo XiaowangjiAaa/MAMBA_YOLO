@@ -562,7 +562,29 @@ class BaseTrainer:
     def optimizer_step(self):
         """Perform a single step of the training optimizer with gradient clipping and EMA update."""
         self.scaler.unscale_(self.optimizer)  # unscale gradients
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)  # clip gradients
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
+        if not torch.isfinite(grad_norm):
+            skipped = getattr(self, "nonfinite_optimizer_steps", 0) + 1
+            self.nonfinite_optimizer_steps = skipped
+            # Enabled GradScaler inspects the already-unscaled gradients and
+            # skips optimizer.step while reducing its scale. Without AMP we must
+            # explicitly avoid applying non-finite gradients.
+            if self.scaler.is_enabled():
+                self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad()
+            if RANK in {-1, 0} and (skipped == 1 or skipped % 4 == 0):
+                LOGGER.warning(
+                    f"WARNING ⚠️ non-finite gradient norm; optimizer step skipped "
+                    f"({skipped} consecutive step(s), AMP scale={self.scaler.get_scale():g})."
+                )
+            if skipped >= 8:
+                raise FloatingPointError(
+                    "Eight consecutive optimizer steps had non-finite gradients. "
+                    "Training was stopped to prevent a silent zero-learning run."
+                )
+            return
+        self.nonfinite_optimizer_steps = 0
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad()

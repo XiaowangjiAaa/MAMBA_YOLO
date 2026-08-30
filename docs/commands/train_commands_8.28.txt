@@ -10,6 +10,10 @@ python check_yaml.py --aug28 --quick --device cpu --imgsz 128 --stub-scan
 # 2. Train the complete reference first.
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28F --seeds 0 --device 0,1 --batch-size 16 --epochs 300 --patience 100 --skip-completed
 
+# 2026-08-30 trainability fix: old 8.28 checkpoints have empty optimizer state;
+# do NOT resume them. Use a clean project and validate Y00 before other configs.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Y00 --seeds 0 --device 0,1 --batch-size 16 --epochs 300 --patience 100 --project ./output_dir/crack-seg-8.30-fix
+
 # 3. Tune token budget, dynamic path length and continuation confidence.
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28S --seeds 0 --device 0,1 --batch-size 16 --epochs 300 --patience 100 --skip-completed --continue-on-error
 
