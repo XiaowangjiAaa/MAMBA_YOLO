@@ -760,8 +760,12 @@ def test_828_structure(model, config_path):
         if not all(getattr(parameter, "_no_weight_decay", False) for parameter in controlled):
             return False, "path/memory scalar controls must be excluded from weight decay"
 
-    expected_connectivity = 0.01 if name.startswith("Y07-") else (0.05 if name.startswith("Y08-") else 0.03)
-    expected_orientation = 0.0 if name.startswith("Y09-") else (0.01 if name.startswith("Y10-") else 0.005)
+    if is_831:
+        expected_connectivity = expected_connectivity_loss
+        expected_orientation = 0.01
+    else:
+        expected_connectivity = 0.01 if name.startswith("Y07-") else (0.05 if name.startswith("Y08-") else 0.03)
+        expected_orientation = 0.0 if name.startswith("Y09-") else (0.01 if name.startswith("Y10-") else 0.005)
     losses = (
         float(model.yaml.get("guidance_loss_weight", 0.0)),
         float(model.yaml.get("connectivity_loss_weight", 0.0)),
