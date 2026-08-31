@@ -369,6 +369,23 @@ AUG31_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(AUG31_EXPERIMENTS)
 
+# 2026-08-31 final: validate Z04/Z10 across seeds and tune only the Z04 design.
+AUG31_FINAL_EXPERIMENTS = {
+    "F00": {"config": "../11/8.31-final/F00-z04-finalist.yaml", "desc": "Z04 finalist: multi-seed short-path model", "phase": "31F"},
+    "F01": {"config": "../11/8.31-final/F01-z10-quality-finalist.yaml", "desc": "Z10 quality finalist: multi-seed high-AP75 model", "phase": "31F"},
+    "F02": {"config": "../11/8.31-final/F02-z04-steps2.yaml", "desc": "Z04 tuning: five-token paths", "phase": "31T"},
+    "F03": {"config": "../11/8.31-final/F03-z04-p3steps2-p4steps3.yaml", "desc": "Z04 tuning: shorter P3 path only", "phase": "31T"},
+    "F04": {"config": "../11/8.31-final/F04-z04-p3steps3-p4steps2.yaml", "desc": "Z04 tuning: shorter P4 path only", "phase": "31T"},
+    "F05": {"config": "../11/8.31-final/F05-z04-conf007.yaml", "desc": "Z04 tuning: continuation confidence 0.07", "phase": "31T"},
+    "F06": {"config": "../11/8.31-final/F06-z04-conf008.yaml", "desc": "Z04 tuning: continuation confidence 0.08", "phase": "31T"},
+    "F07": {"config": "../11/8.31-final/F07-z04-seed001.yaml", "desc": "Z04 tuning: sparse 1% path seeds", "phase": "31T"},
+    "F08": {"config": "../11/8.31-final/F08-z04-maxpaths96.yaml", "desc": "Z04 tuning: cap paths at 96", "phase": "31T"},
+    "F09": {"config": "../11/8.31-final/F09-z04-orientation0015.yaml", "desc": "Z04 tuning: orientation loss 0.015", "phase": "31T"},
+    "F10": {"config": "../11/8.31-final/F10-z04-connectivity002.yaml", "desc": "Z04 tuning: connectivity loss 0.02", "phase": "31T"},
+    "F11": {"config": "../11/8.31-final/F11-z04-guidance005.yaml", "desc": "Z04 tuning: probability loss 0.05", "phase": "31T"},
+}
+ALL_EXPERIMENTS.update(AUG31_FINAL_EXPERIMENTS)
+
 
 def load_status():
     if STATUS_FILE.exists():
@@ -407,7 +424,9 @@ def parse_epoch_progress(line, total_epochs):
 
 def get_run_location(exp_name, args):
     """Return the absolute project directory and stable run name for an experiment/seed."""
-    if exp_name in AUG31_EXPERIMENTS:
+    if exp_name in AUG31_FINAL_EXPERIMENTS:
+        default_project = f"./output_dir/{args.data_stem}-8.31-final"
+    elif exp_name in AUG31_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.31"
     elif exp_name in AUG28_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.28"
@@ -785,6 +804,10 @@ Usage examples:
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31R 31C --seeds 0
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31P 31M --seeds 0
 
+  # 8.31-final: Z04/Z10 seeds, then seed-0 Z04 parameter tuning
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31F --seeds 0 1 2
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31T --seeds 0
+
   # 8.24: corrected Q00 first, then seed-0 stability controls
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24F --seeds 0 1 2
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24H 24R --seeds 0
@@ -802,7 +825,7 @@ Usage examples:
     exp_group.add_argument("--experiments", nargs="+", default=None,
                            help="Specific experiment IDs to run (e.g. B0 S1 S2)")
     exp_group.add_argument("--phase", nargs="+", default=None,
-                           help="Run phases 31R/31C/31P/31M, 28F/28S/28L/28M, or legacy")
+                           help="Run phases 31F/31T, 31R/31C/31P/31M, 28F/28S/28L/28M, or legacy")
     exp_group.add_argument("--exclude", nargs="+", default=None,
                            help="Experiment IDs to exclude")
 
@@ -810,7 +833,7 @@ Usage examples:
     parser.add_argument("--list", action="store_true",
                         help="List all available experiments and exit")
     parser.add_argument("--list-group", default=None,
-                        help="Filter list by phase (31R, 31C, 31P, 31M, 28F, etc.)")
+                        help="Filter list by phase (31F, 31T, 31R, 31C, 31P, 31M, etc.)")
 
     # Data & training params
     train_group = parser.add_argument_group("Training configuration")
@@ -893,15 +916,15 @@ def resolve_experiments(args):
                 if str(info["phase"]) == p:
                     exp_ids.add(eid)
     if not exp_ids and not args.list and not args.experiments and not args.phase:
-        # Default: run the current 8.31 evidence-driven Y10 fusion set.
-        exp_ids = set(AUG31_EXPERIMENTS.keys())
+        # Default: run the current 8.31-final set.
+        exp_ids = set(AUG31_FINAL_EXPERIMENTS.keys())
 
     if args.exclude:
         for e in args.exclude:
             exp_ids.discard(e)
 
     # Sort by phase then by name for a sensible order
-    phase_order = {"31R": 0, "31C": 1, "31P": 2, "31M": 3,
+    phase_order = {"31F": -2, "31T": -1, "31R": 0, "31C": 1, "31P": 2, "31M": 3,
                    "28F": 4, "28S": 5, "28L": 6, "28M": 7,
                    "27B": 8, "27F": 9, "27G": 10, "27O": 11, "27R": 12, "27D": 13, "27C": 14,
                    "26B": 15, "26M": 16, "26D": 17, "26A": 18,

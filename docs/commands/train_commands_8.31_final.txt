@@ -1,0 +1,32 @@
+# 8.31-final: Z04/Z10 multi-seed validation and Z04-only parameter tuning.
+# Primary metric: fresh validation of FP32 best_map50.pt.
+
+# 1) Validate every final config on the training server.
+python check_yaml.py --aug31-final --quick --device cuda:0
+
+# Optional shape-only CPU fallback. Never train with --stub-scan.
+python check_yaml.py --aug31-final --quick --device cpu --imgsz 128 --stub-scan
+
+# 2) Preview all six finalist runs and their output paths.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31F --seeds 0 1 2 --dry-run
+
+# 3) Train Z04 and Z10 with seeds 0/1/2. Completed runs skip and interrupted runs resume automatically.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31F --seeds 0 1 2 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# 4) Preview all ten seed-0 Z04 tuning runs.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31T --seeds 0 --dry-run
+
+# 5a) Priority tuning: path length and continuation confidence.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments F02 F03 F04 F05 F06 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# 5b) Secondary tuning: path budget and auxiliary structure supervision.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments F07 F08 F09 F10 F11 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# Run every tuning YAML in one command if desired.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31T --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# Train only one experiment.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments F03 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+
+# Deliberately restart one run instead of skip/resume.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments F03 --seeds 0 --no-skip-completed --no-resume-interrupted

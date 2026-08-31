@@ -17,7 +17,7 @@ python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31P --seeds 0 -
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31M --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
 
 # Only the primary fusion.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Z01 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Z11 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
 
 # Preview config resolution, output paths, skip and resume decisions.
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31R 31C 31P 31M --seeds 0 --dry-run

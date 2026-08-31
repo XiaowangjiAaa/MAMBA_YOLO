@@ -247,3 +247,15 @@ python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Y00 --see
 python check_yaml.py --aug31 --quick --device cuda:0
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31R 31C --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31P 31M --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+########################################################################
+## 8.31-final Z04/Z10 stability and Z04-only tuning (current)
+########################################################################
+
+python check_yaml.py --aug31-final --quick --device cuda:0
+
+# Finalists: exactly F00(Z04) and F01(Z10), each with seeds 0/1/2.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31F --seeds 0 1 2 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# Z04 parameter tuning only; seed0 screening.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31T --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error

@@ -14,6 +14,7 @@ Usage:
   python check_yaml.py --aug17 --quick
   python check_yaml.py --aug12 --quick
   python check_yaml.py --aug9 --quick
+  python check_yaml.py --phase 31F 31T
   python check_yaml.py --phase A B C
   python check_yaml.py --experiments E09 E10
   python check_yaml.py --list
@@ -223,6 +224,22 @@ AUG31_EXPERIMENTS = {
     "Z11": "../11/8.31-experiments/Z11-y10-dstate16-steps3-conf010.yaml",
 }
 ALL_EXPERIMENTS.update(AUG31_EXPERIMENTS)
+
+AUG31_FINAL_EXPERIMENTS = {
+    "F00": "../11/8.31-final/F00-z04-finalist.yaml",
+    "F01": "../11/8.31-final/F01-z10-quality-finalist.yaml",
+    "F02": "../11/8.31-final/F02-z04-steps2.yaml",
+    "F03": "../11/8.31-final/F03-z04-p3steps2-p4steps3.yaml",
+    "F04": "../11/8.31-final/F04-z04-p3steps3-p4steps2.yaml",
+    "F05": "../11/8.31-final/F05-z04-conf007.yaml",
+    "F06": "../11/8.31-final/F06-z04-conf008.yaml",
+    "F07": "../11/8.31-final/F07-z04-seed001.yaml",
+    "F08": "../11/8.31-final/F08-z04-maxpaths96.yaml",
+    "F09": "../11/8.31-final/F09-z04-orientation0015.yaml",
+    "F10": "../11/8.31-final/F10-z04-connectivity002.yaml",
+    "F11": "../11/8.31-final/F11-z04-guidance005.yaml",
+}
+ALL_EXPERIMENTS.update(AUG31_FINAL_EXPERIMENTS)
 
 # ---- Colours ----
 GREEN = "\033[92m"
@@ -706,7 +723,8 @@ def test_827_structure(model, config_path):
 def test_828_structure(model, config_path):
     """Verify that every 8.28/8.31 YAML keeps the complete dynamic path module."""
     is_831 = "8.31-experiments" in str(config_path)
-    if "8.28-experiments" not in str(config_path) and not is_831:
+    is_831_final = "8.31-final" in str(config_path)
+    if "8.28-experiments" not in str(config_path) and not is_831 and not is_831_final:
         return True, "not an 8.28/8.31 config"
     name = Path(config_path).name
     adapters = [m for m in model.modules() if m.__class__.__name__ == "AdaptiveC3k2CrackPath"]
@@ -719,14 +737,41 @@ def test_828_structure(model, config_path):
         return False, "structure head must predict p + double-angle tangent + four connectivity families"
     if any(torch.count_nonzero(m.state_out.weight.detach()).item() != 0 for m in states):
         return False, "8.28 state_out must be zero-initialized for an exact safe C3k2 start"
-    if any(m.max_paths != 128 or m.state_ratio != 0.25 for m in states):
-        return False, "8.28/8.31 fixes max_paths=128 and state_ratio=0.25"
+    if any(m.state_ratio != 0.25 for m in states):
+        return False, "8.28/8.31 fixes state_ratio=0.25"
 
-    if is_831:
+    if is_831_final:
+        final_expected = {
+            "F00-": (0.02, (3, 3), 0.05, 8, 128, 0.01, 0.03, 0.10),
+            "F01-": (0.04, (4, 4), 0.10, 16, 128, 0.01, 0.03, 0.10),
+            "F02-": (0.02, (2, 2), 0.05, 8, 128, 0.01, 0.03, 0.10),
+            "F03-": (0.02, (2, 3), 0.05, 8, 128, 0.01, 0.03, 0.10),
+            "F04-": (0.02, (3, 2), 0.05, 8, 128, 0.01, 0.03, 0.10),
+            "F05-": (0.02, (3, 3), 0.07, 8, 128, 0.01, 0.03, 0.10),
+            "F06-": (0.02, (3, 3), 0.08, 8, 128, 0.01, 0.03, 0.10),
+            "F07-": (0.01, (3, 3), 0.05, 8, 128, 0.01, 0.03, 0.10),
+            "F08-": (0.02, (3, 3), 0.05, 8, 96, 0.01, 0.03, 0.10),
+            "F09-": (0.02, (3, 3), 0.05, 8, 128, 0.015, 0.03, 0.10),
+            "F10-": (0.02, (3, 3), 0.05, 8, 128, 0.01, 0.02, 0.10),
+            "F11-": (0.02, (3, 3), 0.05, 8, 128, 0.01, 0.03, 0.05),
+        }
+        match = next((values for prefix, values in final_expected.items() if name.startswith(prefix)), None)
+        if match is None:
+            return False, f"unknown 8.31-final config: {name}"
+        (expected_seed, expected_steps, expected_conf, expected_dstate, expected_max_paths,
+         expected_orientation_loss, expected_connectivity_loss, expected_guidance_loss) = match
+        if abs(float(model.yaml.get("orientation_loss_weight", 0.0)) - expected_orientation_loss) > 1e-9:
+            return False, f"orientation loss must be {expected_orientation_loss}"
+        if abs(float(model.yaml.get("connectivity_loss_weight", 0.0)) - expected_connectivity_loss) > 1e-9:
+            return False, f"connectivity loss must be {expected_connectivity_loss}"
+        if abs(float(model.yaml.get("guidance_loss_weight", 0.0)) - expected_guidance_loss) > 1e-9:
+            return False, f"guidance loss must be {expected_guidance_loss}"
+    elif is_831:
         expected_seed = 0.04 if name.startswith(("Z02-", "Z07-", "Z10-")) else 0.02
-        expected_steps = 3 if name.startswith(("Z04-", "Z08-", "Z11-")) else 4
+        expected_steps = (3, 3) if name.startswith(("Z04-", "Z08-", "Z11-")) else (4, 4)
         expected_conf = 0.10 if name.startswith(("Z03-", "Z06-", "Z10-", "Z11-")) else 0.05
         expected_dstate = 16 if name.startswith(("Z01-", "Z06-", "Z07-", "Z08-", "Z09-", "Z10-", "Z11-")) else 8
+        expected_max_paths = 128
         expected_connectivity_loss = 0.01 if name.startswith(("Z05-", "Z09-")) else 0.03
         if abs(float(model.yaml.get("orientation_loss_weight", 0.0)) - 0.01) > 1e-9:
             return False, "8.31 must keep the Y10 orientation loss weight at 0.01"
@@ -734,25 +779,29 @@ def test_828_structure(model, config_path):
             return False, f"8.31 connectivity loss must be {expected_connectivity_loss}"
     else:
         expected_seed = 0.01 if name.startswith("Y01-") else (0.04 if name.startswith("Y02-") else 0.02)
-        expected_steps = 3 if name.startswith("Y03-") else (6 if name.startswith("Y04-") else 4)
+        step = 3 if name.startswith("Y03-") else (6 if name.startswith("Y04-") else 4)
+        expected_steps = (step, step)
         expected_conf = 0.02 if name.startswith("Y05-") else (0.10 if name.startswith("Y06-") else 0.05)
         expected_dstate = 16 if name.startswith("Y15-") else 8
+        expected_max_paths = 128
     expected_route = 0.05 if name.startswith("Y11-") else 0.02
     expected_memory = 0.10 if name.startswith("Y12-") else 0.05
     expected_transition = 0.10 if name.startswith("Y13-") else 0.05
     expected_write = 0.10 if name.startswith("Y14-") else 0.05
-    for state in states:
+    for state_index, state in enumerate(states):
         actual = (
             state.seed_ratio, state.path_steps, state.path_min_conf, float(state.effective_route().detach()),
             float(state.path_ssm.effective_memory().detach()), float(state.path_ssm.effective_transition().detach()),
             float(state.path_ssm.effective_write().detach()), state.path_ssm.d_state,
         )
         expected = (
-            expected_seed, expected_steps, expected_conf, expected_route,
+            expected_seed, expected_steps[state_index], expected_conf, expected_route,
             expected_memory, expected_transition, expected_write, expected_dstate,
         )
         if any(abs(float(a) - float(b)) > 1e-6 for a, b in zip(actual, expected)):
             return False, f"path parameter mismatch: actual={actual}, expected={expected}"
+        if state.max_paths != expected_max_paths:
+            return False, f"max_paths={state.max_paths}, expected={expected_max_paths}"
         controlled = (
             state.route_raw, state.path_ssm.memory_raw,
             state.path_ssm.transition_raw, state.path_ssm.write_raw,
@@ -760,18 +809,24 @@ def test_828_structure(model, config_path):
         if not all(getattr(parameter, "_no_weight_decay", False) for parameter in controlled):
             return False, "path/memory scalar controls must be excluded from weight decay"
 
-    if is_831:
+    if is_831_final:
+        expected_connectivity = expected_connectivity_loss
+        expected_orientation = expected_orientation_loss
+        expected_guidance = expected_guidance_loss
+    elif is_831:
         expected_connectivity = expected_connectivity_loss
         expected_orientation = 0.01
+        expected_guidance = 0.10
     else:
         expected_connectivity = 0.01 if name.startswith("Y07-") else (0.05 if name.startswith("Y08-") else 0.03)
         expected_orientation = 0.0 if name.startswith("Y09-") else (0.01 if name.startswith("Y10-") else 0.005)
+        expected_guidance = 0.10
     losses = (
         float(model.yaml.get("guidance_loss_weight", 0.0)),
         float(model.yaml.get("connectivity_loss_weight", 0.0)),
         float(model.yaml.get("orientation_loss_weight", 0.0)),
     )
-    expected_losses = (0.10, expected_connectivity, expected_orientation)
+    expected_losses = (expected_guidance, expected_connectivity, expected_orientation)
     if any(abs(a - b) > 1e-12 for a, b in zip(losses, expected_losses)):
         return False, f"structure-loss mismatch: actual={losses}, expected={expected_losses}"
     return True, (
@@ -812,7 +867,7 @@ def test_live_aux_cache(model):
 
 def test_828_structure_losses(model, config_path):
     """Numerically exercise all enabled 8.28/8.31 auxiliary structure losses."""
-    if not any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments")):
+    if not any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final")):
         return True, "not an 8.28/8.31 config"
     # Keep this check explicit: an updated check_yaml.py combined with an old
     # ultralytics/utils/loss.py previously raised an unhelpful AttributeError.
@@ -883,7 +938,7 @@ def test_826_gradient_reachability(model, config_path, output):
     does not reach the loss graph. This specifically guards component-ablation
     YAMLs such as W07, where a disabled role must also remove its scalar gate.
     """
-    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments", "8.28-experiments", "8.31-experiments")) or output is None:
+    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments", "8.28-experiments", "8.31-experiments", "8.31-final")) or output is None:
         return True, "not an 8.26/8.27/8.28/8.31 config"
 
     def tensors(value):
@@ -914,7 +969,7 @@ def test_826_gradient_reachability(model, config_path, output):
         scalar, [parameter for _, parameter in named_parameters], retain_graph=True, allow_unused=True
     )
     unused = [name for (name, _), gradient in zip(named_parameters, gradients) if gradient is None]
-    if any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments")):
+    if any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final")):
         # Sparse path geometry is deliberately detached from the detection graph
         # because top-k/argmax/atan2 define a hard routing policy. Its structure
         # head is connected by the explicit probability/tangent/connectivity
@@ -1034,11 +1089,15 @@ def resolve_experiments(args):
         exp_ids.update(AUG28_EXPERIMENTS.keys())
     if args.aug31:
         exp_ids.update(AUG31_EXPERIMENTS.keys())
+    if args.aug31_final:
+        exp_ids.update(AUG31_FINAL_EXPERIMENTS.keys())
     if args.experiments:
         for e in args.experiments:
             exp_ids.add(e)
     if args.phase:
         phase_map = {
+            "31F": ["F00", "F01"],
+            "31T": ["F02", "F03", "F04", "F05", "F06", "F07", "F08", "F09", "F10", "F11"],
             "31R": ["Z00"],
             "31C": ["Z01"],
             "31P": ["Z02", "Z03", "Z04", "Z05"],
@@ -1104,7 +1163,8 @@ def parse_args():
     parser.add_argument("--aug27", action="store_true", help="Check all fixed-full-CASP 8.27 parameter experiments")
     parser.add_argument("--aug28", action="store_true", help="Check all sparse dynamic crack-path 8.28 experiments")
     parser.add_argument("--aug31", action="store_true", help="Check all evidence-driven Y10 fusion experiments")
-    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 31R 31C 31P 31M, 28F..., or legacy")
+    parser.add_argument("--aug31-final", action="store_true", help="Check all 8.31-final finalist/tuning experiments")
+    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 31F 31T, 31R 31C 31P 31M, 28F..., or legacy")
     parser.add_argument("--experiments", nargs="+", default=None, help="Experiment IDs: B0 S1 C2 ...")
     parser.add_argument("--exclude", nargs="+", default=None, help="IDs to exclude")
     parser.add_argument("--list", action="store_true", help="List available experiments")
