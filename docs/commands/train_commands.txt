@@ -240,3 +240,10 @@ python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 28L 28M --seeds
 
 # Single experiment example.
 python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Y00 --seeds 0
+########################################################################
+## 8.31 Y10 evidence-driven fusion experiments (current)
+########################################################################
+
+python check_yaml.py --aug31 --quick --device cuda:0
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31R 31C --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31P 31M --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error

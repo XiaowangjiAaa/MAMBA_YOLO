@@ -535,12 +535,13 @@ def strip_optimizer(f: Union[str, Path] = "best.pt", s: str = "") -> None:
     if hasattr(x["model"], "args"):
         x["model"].args = dict(x["model"].args)  # convert from IterableSimpleNamespace to dict
     args = {**DEFAULT_CFG_DICT, **x["train_args"]} if "train_args" in x else None  # combine args
+    preserve_fp32 = x.get("ema_precision") == "fp32" or Path(f).stem == "best_map50"
     if x.get("ema"):
         x["model"] = x["ema"]  # replace model with ema
     for k in "optimizer", "best_fitness", "ema", "updates":  # keys
         x[k] = None
     x["epoch"] = -1
-    x["model"].half()  # to FP16
+    x["model"].float() if preserve_fp32 else x["model"].half()
     for p in x["model"].parameters():
         p.requires_grad = False
     x["train_args"] = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # strip non-default keys

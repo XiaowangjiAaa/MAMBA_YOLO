@@ -1,0 +1,29 @@
+# 8.31 Y10 evidence-driven fusion experiments
+# Primary metric: fresh validation of FP32 best_map50.pt.
+
+# 1) Validate all configs on the training server.
+python check_yaml.py --aug31 --quick --device cuda:0
+
+# Optional CPU shape/graph fallback only; never train with stub scan.
+python check_yaml.py --aug31 --quick --device cpu --imgsz 128 --stub-scan
+
+# 2) Same-code reference and primary Y10+d_state16 fusion first.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31R 31C --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+
+# 3) Fuse each positive path/structure strategy with Y10.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31P --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# 4) Multi-parameter candidates anchored at Y10+d_state16.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31M --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# Only the primary fusion.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Z01 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+
+# Preview config resolution, output paths, skip and resume decisions.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31R 31C 31P 31M --seeds 0 --dry-run
+
+# After seed-0 ranking, replace ZXX/ZYY with only the top two candidates.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Z00 Z01 ZXX ZYY --seeds 1 2 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# Resume is automatic. To deliberately restart one run, use both flags below.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments Z01 --seeds 0 --no-skip-completed --no-resume-interrupted

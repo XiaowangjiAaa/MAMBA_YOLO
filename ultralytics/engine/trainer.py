@@ -486,28 +486,27 @@ class BaseTrainer:
 
         # Serialize ckpt to a byte buffer once (faster than repeated torch.save() calls)
         buffer = io.BytesIO()
-        torch.save(
-            {
-                "epoch": self.epoch,
-                "best_fitness": self.best_fitness,
-                "best_mask_fitness": self.best_mask_fitness,
-                "best_mask_map50": self.best_mask_map50,
-                "mask_fitness": self.mask_fitness,
-                "mask_map50": self.mask_map50,
-                "model": None,  # resume and final checkpoints derive from EMA
-                "ema": deepcopy(self.ema.ema).half(),
-                "updates": self.ema.updates,
-                "optimizer": convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict())),
-                "train_args": vars(self.args),  # save as dict
-                "train_metrics": {**self.metrics, **{"fitness": self.fitness}},
-                "train_results": {k.strip(): v for k, v in pd.read_csv(self.csv).to_dict(orient="list").items()},
-                "date": datetime.now().isoformat(),
-                "version": __version__,
-                "license": "AGPL-3.0 (https://ultralytics.com/license)",
-                "docs": "https://docs.ultralytics.com",
-            },
-            buffer,
-        )
+        checkpoint = {
+            "epoch": self.epoch,
+            "best_fitness": self.best_fitness,
+            "best_mask_fitness": self.best_mask_fitness,
+            "best_mask_map50": self.best_mask_map50,
+            "mask_fitness": self.mask_fitness,
+            "mask_map50": self.mask_map50,
+            "model": None,  # resume and final checkpoints derive from EMA
+            "ema": deepcopy(self.ema.ema).half(),
+            "ema_precision": "fp16",
+            "updates": self.ema.updates,
+            "optimizer": convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict())),
+            "train_args": vars(self.args),  # save as dict
+            "train_metrics": {**self.metrics, **{"fitness": self.fitness}},
+            "train_results": {k.strip(): v for k, v in pd.read_csv(self.csv).to_dict(orient="list").items()},
+            "date": datetime.now().isoformat(),
+            "version": __version__,
+            "license": "AGPL-3.0 (https://ultralytics.com/license)",
+            "docs": "https://docs.ultralytics.com",
+        }
+        torch.save(checkpoint, buffer)
         serialized_ckpt = buffer.getvalue()  # get the serialized content to save
 
         # Save checkpoints
@@ -517,7 +516,15 @@ class BaseTrainer:
         if self.mask_fitness is not None and self.best_mask_fitness == self.mask_fitness:
             self.best_mask.write_bytes(serialized_ckpt)  # save best_mask.pt
         if self.mask_map50 is not None and self.best_mask_map50 == self.mask_map50:
-            self.best_map50.write_bytes(serialized_ckpt)  # save best_map50.pt
+            # Thin crack masks are unusually sensitive to FP16 checkpoint
+            # quantization. Keep the primary Mask-mAP50 checkpoint in FP32 so
+            # post-training revalidation matches the live EMA metric used to
+            # select it. Other periodic/resume checkpoints remain compact FP16.
+            fp32_buffer = io.BytesIO()
+            checkpoint["ema"] = deepcopy(self.ema.ema).float()
+            checkpoint["ema_precision"] = "fp32"
+            torch.save(checkpoint, fp32_buffer)
+            self.best_map50.write_bytes(fp32_buffer.getvalue())
         if (self.save_period > 0) and (self.epoch > 0) and (self.epoch % self.save_period == 0):
             (self.wdir / f"epoch{self.epoch}.pt").write_bytes(serialized_ckpt)  # save epoch, i.e. 'epoch3.pt'
 
