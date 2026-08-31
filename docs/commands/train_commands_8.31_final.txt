@@ -17,7 +17,7 @@ python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31F --seeds 0 1
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31T --seeds 0 --dry-run
 
 # 5a) Priority tuning: path length and continuation confidence.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments F02 F03 F04 F05 F06 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments F10 F11 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
 
 # 5b) Secondary tuning: path budget and auxiliary structure supervision.
 python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments F07 F08 F09 F10 F11 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error

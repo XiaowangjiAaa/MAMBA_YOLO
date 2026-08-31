@@ -1,0 +1,29 @@
+# 9.1 Z04 general C3k2 replacement experiments
+# Primary metric: fresh validation of FP32 best_map50.pt.
+
+# 1) Validate architecture, placement, losses, AMP and gradient connectivity.
+python check_yaml.py --sep1 --quick --device cuda:0
+
+# Optional CPU shape-only fallback. Never train using the scan stub.
+python check_yaml.py --sep1 --quick --device cpu --imgsz 128 --stub-scan
+
+# 2) Preview paths and automatic skip/resume decisions.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91R 91U --seeds 0 --workers 16 --dry-run
+
+# 3) Same-environment Z04 reference first.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91R --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+
+# 4) Placement/universality tests with unchanged Z04 parameters.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91U --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# 5) Stage-adaptive all-replacement model. Run only after reviewing G04 cost/result.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91A --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+
+# Strict all-eight-C3k2 replacement only.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments G04 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+
+# After seed-0 ranking, replace GXX with only candidates that improve G00 by >= 0.005.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments GXX --seeds 1 2 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# Explicit restart instead of the default skip/resume behavior.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments G04 --seeds 0 --no-skip-completed --no-resume-interrupted

@@ -14,6 +14,7 @@ Usage:
   python check_yaml.py --aug17 --quick
   python check_yaml.py --aug12 --quick
   python check_yaml.py --aug9 --quick
+  python check_yaml.py --sep1
   python check_yaml.py --phase 31F 31T
   python check_yaml.py --phase A B C
   python check_yaml.py --experiments E09 E10
@@ -240,6 +241,16 @@ AUG31_FINAL_EXPERIMENTS = {
     "F11": "../11/8.31-final/F11-z04-guidance005.yaml",
 }
 ALL_EXPERIMENTS.update(AUG31_FINAL_EXPERIMENTS)
+
+SEP1_EXPERIMENTS = {
+    "G00": "../11/9.1-experiments/G00-z04-placement-reference.yaml",
+    "G01": "../11/9.1-experiments/G01-z04-backbone-all-c3k2.yaml",
+    "G02": "../11/9.1-experiments/G02-z04-neck-all-c3k2.yaml",
+    "G03": "../11/9.1-experiments/G03-z04-deep-all-except-p2.yaml",
+    "G04": "../11/9.1-experiments/G04-z04-all-c3k2.yaml",
+    "G05": "../11/9.1-experiments/G05-stage-adaptive-all-c3k2.yaml",
+}
+ALL_EXPERIMENTS.update(SEP1_EXPERIMENTS)
 
 # ---- Colours ----
 GREEN = "\033[92m"
@@ -865,9 +876,77 @@ def test_live_aux_cache(model):
     return True, f"{len(guided)} live graph(s); gradient reaches guidance head(s)"
 
 
+def test_901_structure(model, config_path):
+    """Verify the 9.1 C3k2-placement matrix and unchanged Z04 state design."""
+    if "9.1-experiments" not in str(config_path):
+        return True, "not a 9.1 config"
+    name = Path(config_path).name
+    all_c3k2_positions = (2, 4, 6, 8, 13, 16, 19, 22)
+    expected_positions = {
+        "G00-": (4, 6),
+        "G01-": (2, 4, 6, 8),
+        "G02-": (4, 6, 13, 16, 19, 22),
+        "G03-": (4, 6, 8, 13, 16, 19, 22),
+        "G04-": all_c3k2_positions,
+        "G05-": all_c3k2_positions,
+    }
+    match = next((positions for prefix, positions in expected_positions.items() if name.startswith(prefix)), None)
+    if match is None:
+        return False, f"unknown 9.1 config: {name}"
+    for index in all_c3k2_positions:
+        actual = model.model[index].__class__.__name__
+        expected = "AdaptiveC3k2CrackPath" if index in match else "C3k2"
+        if actual != expected:
+            return False, f"layer {index} is {actual}, expected {expected}"
+
+    adapters = [model.model[index] for index in match]
+    states = [m for adapter in adapters for m in adapter.modules()
+              if m.__class__.__name__ == "SparseCrackPathState"]
+    if len(states) != len(match):
+        return False, f"expected {len(match)} path states, got {len(states)}"
+    if any(state.structure_head[-1].out_channels != 7 for state in states):
+        return False, "every path state must predict p + tangent(2) + connectivity(4)"
+    if any(torch.count_nonzero(state.state_out.weight.detach()).item() != 0 for state in states):
+        return False, "every replacement must preserve the zero-initialized safe residual"
+
+    expected_by_layer = {index: (0.02, 128, 3, 0.05) for index in match}
+    if name.startswith("G05-"):
+        expected_by_layer.update({
+            2: (0.02, 64, 2, 0.05),
+            4: (0.02, 96, 3, 0.05),
+            6: (0.02, 128, 3, 0.05),
+            8: (0.02, 128, 2, 0.05),
+            13: (0.02, 128, 3, 0.05),
+            16: (0.02, 96, 3, 0.05),
+            19: (0.02, 128, 3, 0.05),
+            22: (0.02, 128, 2, 0.05),
+        })
+    for layer_index, state in zip(match, states):
+        expected_seed, expected_max, expected_steps, expected_conf = expected_by_layer[layer_index]
+        actual = (state.seed_ratio, state.max_paths, state.path_steps, state.path_min_conf,
+                  state.state_ratio, state.path_ssm.d_state)
+        expected = (expected_seed, expected_max, expected_steps, expected_conf, 0.25, 8)
+        if any(abs(float(a) - float(b)) > 1e-6 for a, b in zip(actual, expected)):
+            return False, f"layer {layer_index} path mismatch: actual={actual}, expected={expected}"
+        controls = (
+            float(state.effective_route().detach()),
+            float(state.path_ssm.effective_memory().detach()),
+            float(state.path_ssm.effective_transition().detach()),
+            float(state.path_ssm.effective_write().detach()),
+        )
+        if any(abs(a - b) > 1e-6 for a, b in zip(controls, (0.02, 0.05, 0.05, 0.05))):
+            return False, f"layer {layer_index} changed Z04 state controls: {controls}"
+    losses = tuple(float(model.yaml.get(key, 0.0)) for key in (
+        "guidance_loss_weight", "orientation_loss_weight", "connectivity_loss_weight"
+    ))
+    if any(abs(a - b) > 1e-12 for a, b in zip(losses, (0.10, 0.01, 0.03))):
+        return False, f"9.1 must keep Z04 structure losses; got {losses}"
+    return True, f"path blocks at layers={match}; all replacements preserve the Z04 state design"
+
+
 def test_828_structure_losses(model, config_path):
     """Numerically exercise all enabled 8.28/8.31 auxiliary structure losses."""
-    if not any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final")):
+    if not any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments")):
         return True, "not an 8.28/8.31 config"
     # Keep this check explicit: an updated check_yaml.py combined with an old
     # ultralytics/utils/loss.py previously raised an unhelpful AttributeError.
@@ -938,7 +1017,7 @@ def test_826_gradient_reachability(model, config_path, output):
     does not reach the loss graph. This specifically guards component-ablation
     YAMLs such as W07, where a disabled role must also remove its scalar gate.
     """
-    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments", "8.28-experiments", "8.31-experiments", "8.31-final")) or output is None:
+    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments", "8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments")) or output is None:
         return True, "not an 8.26/8.27/8.28/8.31 config"
 
     def tensors(value):
@@ -969,7 +1048,7 @@ def test_826_gradient_reachability(model, config_path, output):
         scalar, [parameter for _, parameter in named_parameters], retain_graph=True, allow_unused=True
     )
     unused = [name for (name, _), gradient in zip(named_parameters, gradients) if gradient is None]
-    if any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final")):
+    if any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments")):
         # Sparse path geometry is deliberately detached from the detection graph
         # because top-k/argmax/atan2 define a hard routing policy. Its structure
         # head is connected by the explicit probability/tangent/connectivity
@@ -1028,6 +1107,9 @@ def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
 
     ok, detail = test_828_structure(model, config_path)
     results.append(("8.28/8.31 sparse crack path", ok, detail or ""))
+
+    ok, detail = test_901_structure(model, config_path)
+    results.append(("9.1 C3k2 replacement placement", ok, detail or ""))
 
     # 2. Deepcopy
     ok, detail = test_deepcopy(model, device)
@@ -1091,11 +1173,16 @@ def resolve_experiments(args):
         exp_ids.update(AUG31_EXPERIMENTS.keys())
     if args.aug31_final:
         exp_ids.update(AUG31_FINAL_EXPERIMENTS.keys())
+    if args.sep1:
+        exp_ids.update(SEP1_EXPERIMENTS.keys())
     if args.experiments:
         for e in args.experiments:
             exp_ids.add(e)
     if args.phase:
         phase_map = {
+            "91R": ["G00"],
+            "91U": ["G01", "G02", "G03", "G04"],
+            "91A": ["G05"],
             "31F": ["F00", "F01"],
             "31T": ["F02", "F03", "F04", "F05", "F06", "F07", "F08", "F09", "F10", "F11"],
             "31R": ["Z00"],
@@ -1164,7 +1251,8 @@ def parse_args():
     parser.add_argument("--aug28", action="store_true", help="Check all sparse dynamic crack-path 8.28 experiments")
     parser.add_argument("--aug31", action="store_true", help="Check all evidence-driven Y10 fusion experiments")
     parser.add_argument("--aug31-final", action="store_true", help="Check all 8.31-final finalist/tuning experiments")
-    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 31F 31T, 31R 31C 31P 31M, 28F..., or legacy")
+    parser.add_argument("--sep1", action="store_true", help="Check all 9.1 C3k2-replacement experiments")
+    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 91R 91U 91A, 31F 31T, or legacy")
     parser.add_argument("--experiments", nargs="+", default=None, help="Experiment IDs: B0 S1 C2 ...")
     parser.add_argument("--exclude", nargs="+", default=None, help="IDs to exclude")
     parser.add_argument("--list", action="store_true", help="List available experiments")

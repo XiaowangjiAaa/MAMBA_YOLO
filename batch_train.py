@@ -386,6 +386,17 @@ AUG31_FINAL_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(AUG31_FINAL_EXPERIMENTS)
 
+# 2026-09-01: test Z04 as a general C3k2 replacement across YOLO11 stages.
+SEP1_EXPERIMENTS = {
+    "G00": {"config": "../11/9.1-experiments/G00-z04-placement-reference.yaml", "desc": "Z04 P3/P4 placement reference", "phase": "91R"},
+    "G01": {"config": "../11/9.1-experiments/G01-z04-backbone-all-c3k2.yaml", "desc": "Replace all backbone C3k2 blocks", "phase": "91U"},
+    "G02": {"config": "../11/9.1-experiments/G02-z04-neck-all-c3k2.yaml", "desc": "Z04 backbone plus all neck C3k2 replacements", "phase": "91U"},
+    "G03": {"config": "../11/9.1-experiments/G03-z04-deep-all-except-p2.yaml", "desc": "Replace every C3k2 except shallow P2", "phase": "91U"},
+    "G04": {"config": "../11/9.1-experiments/G04-z04-all-c3k2.yaml", "desc": "Strict all-eight-C3k2 replacement", "phase": "91U"},
+    "G05": {"config": "../11/9.1-experiments/G05-stage-adaptive-all-c3k2.yaml", "desc": "Scale-aware all-C3k2 replacement", "phase": "91A"},
+}
+ALL_EXPERIMENTS.update(SEP1_EXPERIMENTS)
+
 
 def load_status():
     if STATUS_FILE.exists():
@@ -424,7 +435,9 @@ def parse_epoch_progress(line, total_epochs):
 
 def get_run_location(exp_name, args):
     """Return the absolute project directory and stable run name for an experiment/seed."""
-    if exp_name in AUG31_FINAL_EXPERIMENTS:
+    if exp_name in SEP1_EXPERIMENTS:
+        default_project = f"./output_dir/{args.data_stem}-9.1"
+    elif exp_name in AUG31_FINAL_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.31-final"
     elif exp_name in AUG31_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.31"
@@ -808,6 +821,10 @@ Usage examples:
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31F --seeds 0 1 2
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31T --seeds 0
 
+  # 9.1: test Z04 as backbone/neck/all-C3k2 replacement
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91R 91U --seeds 0
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91A --seeds 0
+
   # 8.24: corrected Q00 first, then seed-0 stability controls
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24F --seeds 0 1 2
   python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 24H 24R --seeds 0
@@ -825,7 +842,7 @@ Usage examples:
     exp_group.add_argument("--experiments", nargs="+", default=None,
                            help="Specific experiment IDs to run (e.g. B0 S1 S2)")
     exp_group.add_argument("--phase", nargs="+", default=None,
-                           help="Run phases 31F/31T, 31R/31C/31P/31M, 28F/28S/28L/28M, or legacy")
+                           help="Run phases 91R/91U/91A, 31F/31T, 31R/31C/31P/31M, or legacy")
     exp_group.add_argument("--exclude", nargs="+", default=None,
                            help="Experiment IDs to exclude")
 
@@ -833,7 +850,7 @@ Usage examples:
     parser.add_argument("--list", action="store_true",
                         help="List all available experiments and exit")
     parser.add_argument("--list-group", default=None,
-                        help="Filter list by phase (31F, 31T, 31R, 31C, 31P, 31M, etc.)")
+                        help="Filter list by phase (91R, 91U, 91A, 31F, 31T, etc.)")
 
     # Data & training params
     train_group = parser.add_argument_group("Training configuration")
@@ -916,15 +933,16 @@ def resolve_experiments(args):
                 if str(info["phase"]) == p:
                     exp_ids.add(eid)
     if not exp_ids and not args.list and not args.experiments and not args.phase:
-        # Default: run the current 8.31-final set.
-        exp_ids = set(AUG31_FINAL_EXPERIMENTS.keys())
+        # Default: run the current 9.1 universality-placement set.
+        exp_ids = set(SEP1_EXPERIMENTS.keys())
 
     if args.exclude:
         for e in args.exclude:
             exp_ids.discard(e)
 
     # Sort by phase then by name for a sensible order
-    phase_order = {"31F": -2, "31T": -1, "31R": 0, "31C": 1, "31P": 2, "31M": 3,
+    phase_order = {"91R": -5, "91U": -4, "91A": -3,
+                   "31F": -2, "31T": -1, "31R": 0, "31C": 1, "31P": 2, "31M": 3,
                    "28F": 4, "28S": 5, "28L": 6, "28M": 7,
                    "27B": 8, "27F": 9, "27G": 10, "27O": 11, "27R": 12, "27D": 13, "27C": 14,
                    "26B": 15, "26M": 16, "26D": 17, "26A": 18,

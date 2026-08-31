@@ -259,3 +259,16 @@ python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31F --seeds 0 1
 
 # Z04 parameter tuning only; seed0 screening.
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 31T --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+########################################################################
+## 9.1 Z04 general C3k2 replacement across YOLO11 (current)
+########################################################################
+
+python check_yaml.py --sep1 --quick --device cuda:0
+
+# Same-code Z04 reference, then backbone/neck/deep/all replacement tests.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91R --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91U --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+
+# Train stage-adaptive full replacement only after reviewing strict G04.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91A --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
