@@ -1303,7 +1303,8 @@ def resolve_experiments(args):
             "93SM": ["H03", "H04", "H05"],
             "93C": ["H06", "H07", "H08"],
             "93W": ["H09", "H10", "H11"],
-            "93F": ["H20", "H21", "H22", "H23", "H24", "H25"],
+            "93F": ["H20", "H21", "H22", "H23"],
+            "93FA": ["H24", "H25"],
             "93F26": ["H26", "H27"],
             "91R": ["G00"],
             "91U": ["G01", "G02", "G03", "G04"],
@@ -1378,7 +1379,7 @@ def parse_args():
     parser.add_argument("--aug31-final", action="store_true", help="Check all 8.31-final finalist/tuning experiments")
     parser.add_argument("--sep1", action="store_true", help="Check all 9.1 C3k2-replacement experiments")
     parser.add_argument("--sep3", action="store_true", help="Check all 9.3 causal-ablation/family experiments")
-    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 93M/93A/93SM/93C/93W/93F/93F26, 91*, or legacy")
+    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 93M/93A/93SM/93C/93W/93F/93F26 (93FA aliases), 91*, or legacy")
     parser.add_argument("--experiments", nargs="+", default=None, help="Experiment IDs: B0 S1 C2 ...")
     parser.add_argument("--exclude", nargs="+", default=None, help="IDs to exclude")
     parser.add_argument("--list", action="store_true", help="List available experiments")

@@ -415,8 +415,8 @@ SEP3_EXPERIMENTS = {
     "H21": {"config": "../11/9.3-experiments/H21-yolov5n-seg-crackpath.yaml", "desc": "YOLOv5n C3 portability", "phase": "93F"},
     "H22": {"config": "../11/9.3-experiments/H22-yolov8n-seg-baseline.yaml", "desc": "YOLOv8n-Seg paired control", "phase": "93F"},
     "H23": {"config": "../11/9.3-experiments/H23-yolov8n-seg-crackpath.yaml", "desc": "YOLOv8n C2f portability", "phase": "93F"},
-    "H24": {"config": "../11/9.3-experiments/H24-yolo11n-seg-baseline.yaml", "desc": "YOLO11n-Seg family control (H00 alias)", "phase": "93F"},
-    "H25": {"config": "../11/9.3-experiments/H25-yolo11n-seg-crackpath.yaml", "desc": "YOLO11n C3k2 portability (H01 alias)", "phase": "93F"},
+    "H24": {"config": "../11/9.3-experiments/H24-yolo11n-seg-baseline.yaml", "desc": "YOLO11n-Seg alias of H00; do not retrain", "phase": "93FA"},
+    "H25": {"config": "../11/9.3-experiments/H25-yolo11n-seg-crackpath.yaml", "desc": "YOLO11n alias of H01; do not retrain", "phase": "93FA"},
     "H26": {"config": "../11/9.3-experiments/H26-yolo26n-seg-compat-baseline.yaml", "desc": "YOLO26n backbone compatibility control", "phase": "93F26"},
     "H27": {"config": "../11/9.3-experiments/H27-yolo26n-seg-compat-crackpath.yaml", "desc": "YOLO26n backbone compatibility + CrackPath", "phase": "93F26"},
 }
@@ -869,7 +869,7 @@ Usage examples:
     exp_group.add_argument("--experiments", nargs="+", default=None,
                            help="Specific experiment IDs to run (e.g. B0 S1 S2)")
     exp_group.add_argument("--phase", nargs="+", default=None,
-                           help="Run phases 93M/93A/93SM/93C/93W/93F/93F26, 91*, or legacy")
+                           help="Run phases 93M/93A/93SM/93C/93W/93F/93F26 (93FA is alias-only), 91*, or legacy")
     exp_group.add_argument("--exclude", nargs="+", default=None,
                            help="Experiment IDs to exclude")
 
@@ -889,8 +889,8 @@ Usage examples:
                              help="Number of epochs per experiment")
     train_group.add_argument("--patience", type=int, default=100,
                              help="Early-stopping patience (E06 is forced to at least 300)")
-    train_group.add_argument("--seeds", nargs="+", type=int, default=[0],
-                             help="One or more seeds; experiments run once per seed")
+    train_group.add_argument("--seeds", nargs="+", type=int, default=[1],
+                             help="One or more seeds; default is the unified experiment seed 1")
     train_group.add_argument("--save-period", type=int, default=10,
                              help="Save a checkpoint every N epochs for mask-centric post-selection")
     train_group.add_argument("--batch-size", type=int, default=16,
@@ -961,7 +961,7 @@ def resolve_experiments(args):
                     exp_ids.add(eid)
     if not exp_ids and not args.list and not args.experiments and not args.phase:
         # Default: run the current 9.3 program. Prefer explicit --phase in production.
-        exp_ids = set(SEP3_EXPERIMENTS.keys())
+        exp_ids = set(SEP3_EXPERIMENTS.keys()) - {"H24", "H25"}
 
     if args.exclude:
         for e in args.exclude:
@@ -969,7 +969,7 @@ def resolve_experiments(args):
 
     # Sort by phase then by name for a sensible order
     phase_order = {"93M": -10, "93A": -9, "93SM": -8, "93C": -7, "93W": -6,
-                   "93F": -5, "93F26": -4, "91R": -3, "91U": -2, "91A": -1,
+                   "93F": -5, "93F26": -4, "93FA": -3, "91R": -3, "91U": -2, "91A": -1,
                    "31F": -2, "31T": -1, "31R": 0, "31C": 1, "31P": 2, "31M": 3,
                    "28F": 4, "28S": 5, "28L": 6, "28M": 7,
                    "27B": 8, "27F": 9, "27G": 10, "27O": 11, "27R": 12, "27D": 13, "27C": 14,

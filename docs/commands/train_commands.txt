@@ -278,8 +278,8 @@ python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91A --seeds 0 -
 ########################################################################
 
 python check_yaml.py --sep3 --quick --device cuda:0
-python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93M --seeds 0 1 2 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
-python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93A 93SM 93C 93W --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
-python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments H20 H21 H22 H23 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93M --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93A 93SM 93C 93W --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments H20 H21 H22 H23 --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
 # H26/H27 are YOLO26-backbone compatibility tests only; see docs/9.3_G01_ABLATION_AND_YOLO_FAMILY_PLAN.md.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93F26 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93F26 --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error

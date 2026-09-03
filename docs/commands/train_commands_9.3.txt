@@ -5,28 +5,25 @@
 python check_yaml.py --sep3 --quick --device cuda:0
 
 # 1) Preview paths, skip/resume decisions, and output_dir/crack-seg-9.3 names.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93M 93A 93SM 93C 93W 93F --seeds 0 --workers 16 --dry-run
+# --seeds can be omitted because batch_train.py now defaults to seed=1.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93M 93A 93SM 93C 93W 93F --workers 16 --dry-run
 
-# 2) Main paired result: H00 baseline and frozen H01, three seeds.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93M --seeds 0 1 2 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+# 2) Main paired result: H00 baseline and frozen H01, seed=1 only.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93M --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
 
 # 3) Auxiliary-only control and Scan x Memory 2x2; H01 is the fourth 2x2 cell.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93A 93SM --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93A 93SM --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
 
 # 4) Structural-cue and memory-component ablations.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93C 93W --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93C 93W --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
 
-# 5) YOLOv5n/v8n/v11n paired portability, seed-0 screening.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93F --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+# 5) YOLO-family paired portability, seed=1 only.
+# H24/H25 duplicate H00/H01, so the recommended command runs only v5/v8 here.
 
-# Avoid duplicate compute: H24==H00 and H25==H01. If 93M is complete, run only v5/v8 here.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments H20 H21 H22 H23 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments H20 H21 H22 H23 --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
 
-# 6) Add seeds only for family candidates that beat their paired baseline by >=0.005.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments H21 H23 --seeds 1 2 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
-
-# 7) Optional legacy-fork YOLO26 backbone compatibility pair. Not native YOLO26 evidence.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93F26 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
+# 6) Optional legacy-fork YOLO26 backbone compatibility pair. Not native YOLO26 evidence.
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 93F26 --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error
 
 # Single experiment example. Skip-completed and resume-interrupted are enabled by default.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments H04 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments H04 --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
