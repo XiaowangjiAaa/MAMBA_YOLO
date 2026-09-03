@@ -1,0 +1,14 @@
+# 9.3 H23: replace only YOLOv8n backbone C2f blocks with C2f-compatible Crack-Path State shells.
+nc: 1
+scale: n
+guidance_loss_weight: 0.1
+guidance_dice_weight: 1.0
+orientation_loss_weight: 0.01
+connectivity_loss_weight: 0.03
+scales: {n: [0.33, 0.25, 1024]}
+c128: &c128 [128, True, 0.5, 0.25, 0.02, 128, 3, 0.05, 0.02, 0.50, 8, 0.05, 0.50, 0.05, 0.50, 0.05, 0.25, 3, 0.01, adaptive, poc, full, True]
+c256: &c256 [256, True, 0.5, 0.25, 0.02, 128, 3, 0.05, 0.02, 0.50, 8, 0.05, 0.50, 0.05, 0.50, 0.05, 0.25, 3, 0.01, adaptive, poc, full, True]
+c512: &c512 [512, True, 0.5, 0.25, 0.02, 128, 3, 0.05, 0.02, 0.50, 8, 0.05, 0.50, 0.05, 0.50, 0.05, 0.25, 3, 0.01, adaptive, poc, full, True]
+c1024: &c1024 [1024, True, 0.5, 0.25, 0.02, 128, 3, 0.05, 0.02, 0.50, 8, 0.05, 0.50, 0.05, 0.50, 0.05, 0.25, 3, 0.01, adaptive, poc, full, True]
+backbone: [[-1, 1, Conv, [64, 3, 2]], [-1, 1, Conv, [128, 3, 2]], [-1, 3, AdaptiveC2fCrackPath, *c128], [-1, 1, Conv, [256, 3, 2]], [-1, 6, AdaptiveC2fCrackPath, *c256], [-1, 1, Conv, [512, 3, 2]], [-1, 6, AdaptiveC2fCrackPath, *c512], [-1, 1, Conv, [1024, 3, 2]], [-1, 3, AdaptiveC2fCrackPath, *c1024], [-1, 1, SPPF, [1024, 5]]]
+head: [[-1, 1, nn.Upsample, [None, 2, nearest]], [[-1, 6], 1, Concat, [1]], [-1, 3, C2f, [512]], [-1, 1, nn.Upsample, [None, 2, nearest]], [[-1, 4], 1, Concat, [1]], [-1, 3, C2f, [256]], [-1, 1, Conv, [256, 3, 2]], [[-1, 12], 1, Concat, [1]], [-1, 3, C2f, [512]], [-1, 1, Conv, [512, 3, 2]], [[-1, 9], 1, Concat, [1]], [-1, 3, C2f, [1024]], [[15, 18, 21], 1, Segment, [nc, 32, 256]]]

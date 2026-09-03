@@ -73,6 +73,8 @@ from ultralytics.nn.modules import (
     EfficientCrackAlignedState,
     AdaptiveC3k2CASP,
     AdaptiveC3k2CrackPath,
+    AdaptiveC2fCrackPath,
+    AdaptiveC3CrackPath,
     AdaptiveC2fCASP,
     CrackDetailStemLite,
     CrackDetailStemDirectional,
@@ -934,7 +936,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             CrackMemoryVSSBlock, CrackStructureVSSBlock,
             UnifiedCrackAwareVSSBlock, CrackDetailStemLite, CrackDetailStemDirectional,
             LastUnifiedCrackAwareVSSStage, EfficientCrackAlignedState, AdaptiveC3k2CASP,
-            AdaptiveC3k2CrackPath,
+            AdaptiveC3k2CrackPath, AdaptiveC2fCrackPath, AdaptiveC3CrackPath,
             AdaptiveC2fCASP,
             CrackMergeLite, CrackMergeDirectional
         }:
@@ -950,7 +952,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, c2, *args[1:]]
             if m in {
                 BottleneckCSP, C1, C2, C2f, C3k, C3k2, AdaptiveC3k2CASP,
-                AdaptiveC3k2CrackPath,
+                AdaptiveC3k2CrackPath, AdaptiveC2fCrackPath, AdaptiveC3CrackPath,
                 AdaptiveC2fCASP,
                 C2fAttn, C3, C3TR, C3Ghost, C3x, RepC3, XSSBlock,
                 CrackXSSBlock, CrackXSSBlockV2, LastCrackWriteVSSStage, LastCenteredCrackWriteVSSStage,

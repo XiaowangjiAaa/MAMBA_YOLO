@@ -22,6 +22,8 @@ __all__ = (
     "AdaptiveC2fCASP",
     "SparseCrackPathState",
     "AdaptiveC3k2CrackPath",
+    "AdaptiveC2fCrackPath",
+    "AdaptiveC3CrackPath",
     "CrackDetailStemLite",
     "CrackDetailStemDirectional",
     "CrackMergeLite",
@@ -1199,12 +1201,16 @@ class CrackPathSelectiveSSM(nn.Module):
 
     def __init__(self, channels, d_state=8, memory_init=0.05, memory_max=0.5,
                  transition_init=0.05, transition_max=0.5,
-                 write_init=0.05, write_max=0.25):
+                 write_init=0.05, write_max=0.25, memory_mode="full"):
         super().__init__()
         self.channels = int(channels)
         self.d_state = int(d_state)
         self.dt_rank = max(1, math.ceil(channels / 16))
         self.K = 2
+        self.memory_mode = str(memory_mode).lower()
+        valid_memory_modes = {"standard", "retention", "retention_transition", "retention_write", "full"}
+        if self.memory_mode not in valid_memory_modes:
+            raise ValueError(f"memory_mode must be one of {sorted(valid_memory_modes)}, got {memory_mode!r}")
 
         projections = [nn.Linear(channels, self.dt_rank + 2 * self.d_state, bias=False) for _ in range(self.K)]
         self.x_proj_weight = nn.Parameter(torch.stack([layer.weight for layer in projections], dim=0))
@@ -1222,25 +1228,29 @@ class CrackPathSelectiveSSM(nn.Module):
             ratio = initial / maximum
             return math.log(ratio / (1.0 - ratio))
 
-        self.memory_raw = nn.Parameter(torch.tensor(bounded_raw(memory_init, memory_max, "memory_init")))
+        use_memory = self.memory_mode != "standard"
+        use_transition = self.memory_mode in {"retention_transition", "full"}
+        use_write = self.memory_mode in {"retention_write", "full"}
+        self.memory_raw = nn.Parameter(torch.tensor(bounded_raw(memory_init, memory_max, "memory_init"))) if use_memory else None
         self.transition_raw = nn.Parameter(
             torch.tensor(bounded_raw(transition_init, transition_max, "transition_init"))
-        )
-        self.write_raw = nn.Parameter(torch.tensor(bounded_raw(write_init, write_max, "write_init")))
+        ) if use_transition else None
+        self.write_raw = nn.Parameter(torch.tensor(bounded_raw(write_init, write_max, "write_init"))) if use_write else None
         for parameter in (self.memory_raw, self.transition_raw, self.write_raw):
-            parameter._no_weight_decay = True
+            if parameter is not None:
+                parameter._no_weight_decay = True
         self.memory_max = float(memory_max)
         self.transition_max = float(transition_max)
         self.write_max = float(write_max)
 
     def effective_memory(self):
-        return self.memory_max * self.memory_raw.sigmoid()
+        return self.A_logs.new_zeros(()) if self.memory_raw is None else self.memory_max * self.memory_raw.sigmoid()
 
     def effective_transition(self):
-        return self.transition_max * self.transition_raw.sigmoid()
+        return self.A_logs.new_zeros(()) if self.transition_raw is None else self.transition_max * self.transition_raw.sigmoid()
 
     def effective_write(self):
-        return self.write_max * self.write_raw.sigmoid()
+        return self.A_logs.new_zeros(()) if self.write_raw is None else self.write_max * self.write_raw.sigmoid()
 
     def _selective_recurrence(self, xs, dts, Bs, Cs):
         """Parallel FP32 selective SSM for short NKCL crack paths.
@@ -1318,7 +1328,8 @@ class SparseCrackPathState(nn.Module):
                  d_state=8, memory_init=0.05, memory_max=0.5,
                  transition_init=0.05, transition_max=0.5,
                  write_init=0.05, write_max=0.25,
-                 structure_kernel=3, structure_init_std=0.01):
+                 structure_kernel=3, structure_init_std=0.01,
+                 path_mode="adaptive", cue_mode="poc", memory_mode="full", route_enabled=True):
         super().__init__()
         self.channels = int(channels)
         self.state_ratio = float(state_ratio)
@@ -1326,6 +1337,14 @@ class SparseCrackPathState(nn.Module):
         self.max_paths = int(max_paths)
         self.path_steps = int(path_steps)
         self.path_min_conf = float(path_min_conf)
+        self.path_mode = str(path_mode).lower()
+        self.cue_mode = str(cue_mode).lower()
+        self.memory_mode = str(memory_mode).lower()
+        self.route_enabled = bool(route_enabled)
+        if self.path_mode not in {"adaptive", "fixed"}:
+            raise ValueError("path_mode must be 'adaptive' or 'fixed'")
+        if self.cue_mode not in {"p", "po", "pc", "poc"}:
+            raise ValueError("cue_mode must be one of: p, po, pc, poc")
         if not 0.0 < self.seed_ratio <= 1.0:
             raise ValueError("seed_ratio must be in (0, 1]")
         if self.max_paths < 1 or self.path_steps < 1:
@@ -1349,18 +1368,20 @@ class SparseCrackPathState(nn.Module):
         )
         nn.init.normal_(self.structure_head[-1].weight, mean=0.0, std=structure_init_std)
         nn.init.zeros_(self.structure_head[-1].bias)
-        self.path_ssm = CrackPathSelectiveSSM(
-            self.state_channels, d_state, memory_init, memory_max,
-            transition_init, transition_max, write_init, write_max
-        )
-        self.state_out = nn.Conv2d(self.state_channels, channels, kernel_size=1, bias=False)
-        # ReZero-style safe start: the new block is exactly the local YOLO C3k2
-        # path at initialization. The projection learns first, then gradually
-        # exposes the crack-path state without corrupting early backbone features.
-        nn.init.zeros_(self.state_out.weight)
-        route_ratio = route_init / route_max
-        self.route_raw = nn.Parameter(torch.tensor(math.log(route_ratio / (1.0 - route_ratio))))
-        self.route_raw._no_weight_decay = True
+        self.path_ssm = None
+        self.state_out = None
+        self.route_raw = None
+        if self.route_enabled:
+            self.path_ssm = CrackPathSelectiveSSM(
+                self.state_channels, d_state, memory_init, memory_max,
+                transition_init, transition_max, write_init, write_max, memory_mode
+            )
+            self.state_out = nn.Conv2d(self.state_channels, channels, kernel_size=1, bias=False)
+            # ReZero-style safe start preserves the host CSP path at initialization.
+            nn.init.zeros_(self.state_out.weight)
+            route_ratio = route_init / route_max
+            self.route_raw = nn.Parameter(torch.tensor(math.log(route_ratio / (1.0 - route_ratio))))
+            self.route_raw._no_weight_decay = True
         self.route_max = float(route_max)
 
         offsets = torch.tensor(
@@ -1394,7 +1415,7 @@ class SparseCrackPathState(nn.Module):
         return state
 
     def effective_route(self):
-        return self.route_max * self.route_raw.sigmoid()
+        return self.state_in.weight.new_zeros(()) if self.route_raw is None else self.route_max * self.route_raw.sigmoid()
 
     @staticmethod
     def _gather_flat(field, indices):
@@ -1428,13 +1449,36 @@ class SparseCrackPathState(nn.Module):
             neighbor_connectivity = self._gather_flat(connectivity, flat_candidate).view(batch, 4, paths, 8)
             current_orientation = self._gather_flat(orientation, current)
             current_connectivity = self._gather_flat(connectivity, current)
+            directions = self.neighbor_vectors.to(probability.dtype)
+
+            if getattr(self, "path_mode", "adaptive") == "fixed":
+                # Four straight scan families, balanced across seeds. This is the
+                # control for testing whether curved, content-adaptive ordering is
+                # better than merely selecting crack-like seed tokens.
+                family_direction = seeds.new_tensor((0, 2, 1, 3))[torch.arange(paths, device=seeds.device) % 4]
+                if sign < 0:
+                    family_direction = family_direction + 4
+                best_direction = family_direction[None].expand(batch, -1)
+                best_score = neighbor_probability.gather(-1, best_direction[..., None]).squeeze(-1)
+                best_score = best_score.masked_fill(
+                    ~valid.gather(-1, best_direction[..., None]).squeeze(-1), -1.0
+                )
+                next_index = candidate.gather(-1, best_direction[..., None]).squeeze(-1)
+                step_active = active & (best_score >= self.path_min_conf)
+                current = torch.where(step_active, next_index, current)
+                current_row, current_col = current.div(width, rounding_mode="floor"), current.remainder(width)
+                heading = torch.where(step_active[..., None], directions[best_direction], heading)
+                active = step_active
+                indices.append(current)
+                edges.append(best_score.clamp(0.0, 1.0) * active.to(best_score.dtype))
+                masks.append(active)
+                continue
 
             local_theta = 0.5 * torch.atan2(current_orientation[:, 1], current_orientation[:, 0])
             local_tangent = torch.stack((torch.sin(local_theta), torch.cos(local_theta)), dim=-1)
             local_tangent = torch.where(
                 (local_tangent * heading).sum(-1, keepdim=True) < 0, -local_tangent, local_tangent
             )
-            directions = self.neighbor_vectors.to(probability.dtype)
             current_alignment = (local_tangent[:, :, None] * directions).sum(-1).clamp_min(0.0)
             heading_alignment = (heading[:, :, None] * directions).sum(-1).clamp_min(0.0)
 
@@ -1446,8 +1490,16 @@ class SparseCrackPathState(nn.Module):
             family_index = family.view(1, 1, 1, 8).expand(batch, 1, paths, 8)
             neighbor_family = neighbor_connectivity.gather(1, family_index).squeeze(1)
             connection = torch.sqrt((current_family * neighbor_family).clamp_min(1e-6))
-            score = neighbor_probability * connection * current_alignment * neighbor_alignment
-            score = score * (0.5 + 0.5 * heading_alignment)
+            score = neighbor_probability
+            cue_mode = getattr(self, "cue_mode", "poc")
+            if "c" in cue_mode:
+                score = score * connection
+            if "o" in cue_mode:
+                # Keep the exact multiplication order of the frozen G01 path
+                # when cue_mode=poc, including its floating-point behaviour.
+                score = score * current_alignment
+                score = score * neighbor_alignment
+                score = score * (0.5 + 0.5 * heading_alignment)
             score = score.masked_fill(~valid, -1.0)
             best_score, best_direction = score.max(dim=-1)
             next_index = candidate.gather(-1, best_direction[..., None]).squeeze(-1)
@@ -1502,6 +1554,11 @@ class SparseCrackPathState(nn.Module):
         self.visual_orientation = orientation.detach()
         self.visual_connectivity = connectivity.detach()
 
+        if not getattr(self, "route_enabled", True):
+            self.last_path_indices = None
+            self.last_path_mask = None
+            return x
+
         # Top-k, argmax direction selection and thresholded continuation form a
         # hard routing policy. Differentiating through its atan2/sqrt scores is
         # neither meaningful (the selected indices are discrete) nor AMP-safe:
@@ -1532,10 +1589,11 @@ class SparseCrackPathState(nn.Module):
 
 
 class _AdaptiveCrackPathUnit(nn.Module):
-    def __init__(self, channels, c3k=False, shortcut=True, **path_kwargs):
+    def __init__(self, channels, c3k=False, shortcut=True, c3_style=False, **path_kwargs):
         super().__init__()
+        local_kernel = ((1, 1), (3, 3)) if c3_style else ((3, 3), (3, 3))
         self.local = C3k(channels, channels, 2, shortcut) if c3k else Bottleneck(
-            channels, channels, shortcut, 1, k=((3, 3), (3, 3)), e=1.0
+            channels, channels, shortcut, 1, k=local_kernel, e=1.0
         )
         self.path = SparseCrackPathState(channels, **path_kwargs)
 
@@ -1552,7 +1610,8 @@ class AdaptiveC3k2CrackPath(nn.Module):
                  memory_init=0.05, memory_max=0.5,
                  transition_init=0.05, transition_max=0.5,
                  write_init=0.05, write_max=0.25,
-                 structure_kernel=3, structure_init_std=0.01, shortcut=True):
+                 structure_kernel=3, structure_init_std=0.01, shortcut=True,
+                 path_mode="adaptive", cue_mode="poc", memory_mode="full", route_enabled=True):
         super().__init__()
         self.c = int(c2 * e)
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
@@ -1565,6 +1624,8 @@ class AdaptiveC3k2CrackPath(nn.Module):
             transition_init=transition_init, transition_max=transition_max,
             write_init=write_init, write_max=write_max,
             structure_kernel=structure_kernel, structure_init_std=structure_init_std,
+            path_mode=path_mode, cue_mode=cue_mode, memory_mode=memory_mode,
+            route_enabled=route_enabled,
         )
         units = []
         for index in range(n):
@@ -1581,6 +1642,65 @@ class AdaptiveC3k2CrackPath(nn.Module):
         y = list(self.cv1(x).chunk(2, 1))
         y.extend(module(y[-1]) for module in self.m)
         return self.cv2(torch.cat(y, dim=1))
+
+
+class AdaptiveC2fCrackPath(AdaptiveC3k2CrackPath):
+    """YOLOv8 C2f-compatible shell with the same final crack-path state unit."""
+
+    def __init__(self, c1, c2, n=1, shortcut=False, e=0.5, state_ratio=0.25,
+                 seed_ratio=0.02, max_paths=128, path_steps=3, path_min_conf=0.05,
+                 route_init=0.02, route_max=0.5, d_state=8,
+                 memory_init=0.05, memory_max=0.5,
+                 transition_init=0.05, transition_max=0.5,
+                 write_init=0.05, write_max=0.25,
+                 structure_kernel=3, structure_init_std=0.01,
+                 path_mode="adaptive", cue_mode="poc", memory_mode="full", route_enabled=True):
+        super().__init__(
+            c1, c2, n, False, e, state_ratio, seed_ratio, max_paths, path_steps,
+            path_min_conf, route_init, route_max, d_state, memory_init, memory_max,
+            transition_init, transition_max, write_init, write_max, structure_kernel,
+            structure_init_std, shortcut, path_mode, cue_mode, memory_mode, route_enabled
+        )
+
+
+class AdaptiveC3CrackPath(nn.Module):
+    """YOLOv5 C3-compatible shell with one crack-path state unit per CSP block."""
+
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, state_ratio=0.25,
+                 seed_ratio=0.02, max_paths=128, path_steps=3, path_min_conf=0.05,
+                 route_init=0.02, route_max=0.5, d_state=8,
+                 memory_init=0.05, memory_max=0.5,
+                 transition_init=0.05, transition_max=0.5,
+                 write_init=0.05, write_max=0.25,
+                 structure_kernel=3, structure_init_std=0.01,
+                 path_mode="adaptive", cue_mode="poc", memory_mode="full", route_enabled=True):
+        super().__init__()
+        hidden = int(c2 * e)
+        self.cv1 = Conv(c1, hidden, 1, 1)
+        self.cv2 = Conv(c1, hidden, 1, 1)
+        self.cv3 = Conv(2 * hidden, c2, 1)
+        path_kwargs = dict(
+            state_ratio=state_ratio, seed_ratio=seed_ratio, max_paths=max_paths,
+            path_steps=path_steps, path_min_conf=path_min_conf,
+            route_init=route_init, route_max=route_max, d_state=d_state,
+            memory_init=memory_init, memory_max=memory_max,
+            transition_init=transition_init, transition_max=transition_max,
+            write_init=write_init, write_max=write_max,
+            structure_kernel=structure_kernel, structure_init_std=structure_init_std,
+            path_mode=path_mode, cue_mode=cue_mode, memory_mode=memory_mode,
+            route_enabled=route_enabled,
+        )
+        units = []
+        for index in range(n):
+            units.append(
+                _AdaptiveCrackPathUnit(hidden, False, shortcut, c3_style=True, **path_kwargs)
+                if index == n - 1 else
+                Bottleneck(hidden, hidden, shortcut, g, k=((1, 1), (3, 3)), e=1.0)
+            )
+        self.m = nn.Sequential(*units)
+
+    def forward(self, x):
+        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
 
 
 class SimpleStem(nn.Module):

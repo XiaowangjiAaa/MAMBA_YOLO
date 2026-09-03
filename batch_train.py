@@ -397,6 +397,31 @@ SEP1_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(SEP1_EXPERIMENTS)
 
+# 2026-09-03: freeze G01, establish causal ablations, and test n-scale portability.
+SEP3_EXPERIMENTS = {
+    "H00": {"config": "../11/9.3-experiments/H00-yolo11n-seg-baseline.yaml", "desc": "YOLO11n-Seg control", "phase": "93M"},
+    "H01": {"config": "../11/9.3-experiments/H01-g01-full.yaml", "desc": "Frozen G01 full method", "phase": "93M"},
+    "H02": {"config": "../11/9.3-experiments/H02-aux-only.yaml", "desc": "Structure-supervision-only control", "phase": "93A"},
+    "H03": {"config": "../11/9.3-experiments/H03-fixed-standard.yaml", "desc": "Fixed scan + standard memory", "phase": "93SM"},
+    "H04": {"config": "../11/9.3-experiments/H04-adaptive-standard.yaml", "desc": "Adaptive scan + standard memory", "phase": "93SM"},
+    "H05": {"config": "../11/9.3-experiments/H05-fixed-full-memory.yaml", "desc": "Fixed scan + crack-aware memory", "phase": "93SM"},
+    "H06": {"config": "../11/9.3-experiments/H06-cue-p.yaml", "desc": "Adaptive scan with p only", "phase": "93C"},
+    "H07": {"config": "../11/9.3-experiments/H07-cue-po.yaml", "desc": "Adaptive scan with p+orientation", "phase": "93C"},
+    "H08": {"config": "../11/9.3-experiments/H08-cue-pc.yaml", "desc": "Adaptive scan with p+connectivity", "phase": "93C"},
+    "H09": {"config": "../11/9.3-experiments/H09-memory-retention.yaml", "desc": "Delta retention only", "phase": "93W"},
+    "H10": {"config": "../11/9.3-experiments/H10-memory-retention-transition.yaml", "desc": "Delta retention + transition", "phase": "93W"},
+    "H11": {"config": "../11/9.3-experiments/H11-memory-retention-write.yaml", "desc": "Delta retention + B/write", "phase": "93W"},
+    "H20": {"config": "../11/9.3-experiments/H20-yolov5n-seg-baseline.yaml", "desc": "YOLOv5n-Seg paired control", "phase": "93F"},
+    "H21": {"config": "../11/9.3-experiments/H21-yolov5n-seg-crackpath.yaml", "desc": "YOLOv5n C3 portability", "phase": "93F"},
+    "H22": {"config": "../11/9.3-experiments/H22-yolov8n-seg-baseline.yaml", "desc": "YOLOv8n-Seg paired control", "phase": "93F"},
+    "H23": {"config": "../11/9.3-experiments/H23-yolov8n-seg-crackpath.yaml", "desc": "YOLOv8n C2f portability", "phase": "93F"},
+    "H24": {"config": "../11/9.3-experiments/H24-yolo11n-seg-baseline.yaml", "desc": "YOLO11n-Seg family control (H00 alias)", "phase": "93F"},
+    "H25": {"config": "../11/9.3-experiments/H25-yolo11n-seg-crackpath.yaml", "desc": "YOLO11n C3k2 portability (H01 alias)", "phase": "93F"},
+    "H26": {"config": "../11/9.3-experiments/H26-yolo26n-seg-compat-baseline.yaml", "desc": "YOLO26n backbone compatibility control", "phase": "93F26"},
+    "H27": {"config": "../11/9.3-experiments/H27-yolo26n-seg-compat-crackpath.yaml", "desc": "YOLO26n backbone compatibility + CrackPath", "phase": "93F26"},
+}
+ALL_EXPERIMENTS.update(SEP3_EXPERIMENTS)
+
 
 def load_status():
     if STATUS_FILE.exists():
@@ -435,7 +460,9 @@ def parse_epoch_progress(line, total_epochs):
 
 def get_run_location(exp_name, args):
     """Return the absolute project directory and stable run name for an experiment/seed."""
-    if exp_name in SEP1_EXPERIMENTS:
+    if exp_name in SEP3_EXPERIMENTS:
+        default_project = f"./output_dir/{args.data_stem}-9.3"
+    elif exp_name in SEP1_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-9.1"
     elif exp_name in AUG31_FINAL_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-8.31-final"
@@ -842,7 +869,7 @@ Usage examples:
     exp_group.add_argument("--experiments", nargs="+", default=None,
                            help="Specific experiment IDs to run (e.g. B0 S1 S2)")
     exp_group.add_argument("--phase", nargs="+", default=None,
-                           help="Run phases 91R/91U/91A, 31F/31T, 31R/31C/31P/31M, or legacy")
+                           help="Run phases 93M/93A/93SM/93C/93W/93F/93F26, 91*, or legacy")
     exp_group.add_argument("--exclude", nargs="+", default=None,
                            help="Experiment IDs to exclude")
 
@@ -933,15 +960,16 @@ def resolve_experiments(args):
                 if str(info["phase"]) == p:
                     exp_ids.add(eid)
     if not exp_ids and not args.list and not args.experiments and not args.phase:
-        # Default: run the current 9.1 universality-placement set.
-        exp_ids = set(SEP1_EXPERIMENTS.keys())
+        # Default: run the current 9.3 program. Prefer explicit --phase in production.
+        exp_ids = set(SEP3_EXPERIMENTS.keys())
 
     if args.exclude:
         for e in args.exclude:
             exp_ids.discard(e)
 
     # Sort by phase then by name for a sensible order
-    phase_order = {"91R": -5, "91U": -4, "91A": -3,
+    phase_order = {"93M": -10, "93A": -9, "93SM": -8, "93C": -7, "93W": -6,
+                   "93F": -5, "93F26": -4, "91R": -3, "91U": -2, "91A": -1,
                    "31F": -2, "31T": -1, "31R": 0, "31C": 1, "31P": 2, "31M": 3,
                    "28F": 4, "28S": 5, "28L": 6, "28M": 7,
                    "27B": 8, "27F": 9, "27G": 10, "27O": 11, "27R": 12, "27D": 13, "27C": 14,

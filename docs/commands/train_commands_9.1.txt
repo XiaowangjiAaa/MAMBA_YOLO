@@ -20,7 +20,7 @@ python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91U --seeds 0 -
 python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 91A --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
 
 # Strict all-eight-C3k2 replacement only.
-python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments G04 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments G05 --seeds 0 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100
 
 # After seed-0 ranking, replace GXX with only candidates that improve G00 by >= 0.005.
 python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments GXX --seeds 1 2 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --continue-on-error

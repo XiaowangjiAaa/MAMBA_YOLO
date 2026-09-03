@@ -252,6 +252,30 @@ SEP1_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(SEP1_EXPERIMENTS)
 
+SEP3_EXPERIMENTS = {
+    "H00": "../11/9.3-experiments/H00-yolo11n-seg-baseline.yaml",
+    "H01": "../11/9.3-experiments/H01-g01-full.yaml",
+    "H02": "../11/9.3-experiments/H02-aux-only.yaml",
+    "H03": "../11/9.3-experiments/H03-fixed-standard.yaml",
+    "H04": "../11/9.3-experiments/H04-adaptive-standard.yaml",
+    "H05": "../11/9.3-experiments/H05-fixed-full-memory.yaml",
+    "H06": "../11/9.3-experiments/H06-cue-p.yaml",
+    "H07": "../11/9.3-experiments/H07-cue-po.yaml",
+    "H08": "../11/9.3-experiments/H08-cue-pc.yaml",
+    "H09": "../11/9.3-experiments/H09-memory-retention.yaml",
+    "H10": "../11/9.3-experiments/H10-memory-retention-transition.yaml",
+    "H11": "../11/9.3-experiments/H11-memory-retention-write.yaml",
+    "H20": "../11/9.3-experiments/H20-yolov5n-seg-baseline.yaml",
+    "H21": "../11/9.3-experiments/H21-yolov5n-seg-crackpath.yaml",
+    "H22": "../11/9.3-experiments/H22-yolov8n-seg-baseline.yaml",
+    "H23": "../11/9.3-experiments/H23-yolov8n-seg-crackpath.yaml",
+    "H24": "../11/9.3-experiments/H24-yolo11n-seg-baseline.yaml",
+    "H25": "../11/9.3-experiments/H25-yolo11n-seg-crackpath.yaml",
+    "H26": "../11/9.3-experiments/H26-yolo26n-seg-compat-baseline.yaml",
+    "H27": "../11/9.3-experiments/H27-yolo26n-seg-compat-crackpath.yaml",
+}
+ALL_EXPERIMENTS.update(SEP3_EXPERIMENTS)
+
 # ---- Colours ----
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -944,9 +968,59 @@ def test_901_structure(model, config_path):
     return True, f"path blocks at layers={match}; all replacements preserve the Z04 state design"
 
 
+def test_903_structure(model, config_path):
+    """Validate the frozen 9.3 causal-ablation and cross-family interfaces."""
+    if "9.3-experiments" not in str(config_path):
+        return True, "not a 9.3 config"
+    name = Path(config_path).name
+    if model.yaml.get("scale") != "n":
+        return False, "9.3 family study must use the n scale"
+
+    states = [m for m in model.modules() if m.__class__.__name__ == "SparseCrackPathState"]
+    baseline_ids = {"H00", "H20", "H22", "H24", "H26"}
+    experiment_id = name.split("-", 1)[0]
+    if experiment_id in baseline_ids:
+        if states:
+            return False, f"baseline {experiment_id} unexpectedly contains {len(states)} crack-path state(s)"
+        if experiment_id == "H26" and not model.yaml.get("yolo26_compatibility_mode"):
+            return False, "H26 must declare the legacy-fork YOLO26 compatibility limitation"
+        return True, f"{experiment_id} n-scale baseline has no crack-path state"
+
+    expected_wrapper = {
+        "H21": "AdaptiveC3CrackPath",
+        "H23": "AdaptiveC2fCrackPath",
+    }.get(experiment_id, "AdaptiveC3k2CrackPath")
+    wrappers = [m for m in model.modules() if m.__class__.__name__ == expected_wrapper]
+    if len(wrappers) != 4 or len(states) != 4:
+        return False, f"{experiment_id}: expected four {expected_wrapper}/state modules, got {len(wrappers)}/{len(states)}"
+    if experiment_id == "H27" and not model.yaml.get("yolo26_compatibility_mode"):
+        return False, "H27 must declare the legacy-fork YOLO26 compatibility limitation"
+
+    expected = {
+        "H02": ("adaptive", "poc", "full", False),
+        "H03": ("fixed", "poc", "standard", True),
+        "H04": ("adaptive", "poc", "standard", True),
+        "H05": ("fixed", "poc", "full", True),
+        "H06": ("adaptive", "p", "full", True),
+        "H07": ("adaptive", "po", "full", True),
+        "H08": ("adaptive", "pc", "full", True),
+        "H09": ("adaptive", "poc", "retention", True),
+        "H10": ("adaptive", "poc", "retention_transition", True),
+        "H11": ("adaptive", "poc", "retention_write", True),
+    }.get(experiment_id, ("adaptive", "poc", "full", True))
+    actual = {(s.path_mode, s.cue_mode, s.memory_mode, s.route_enabled) for s in states}
+    if actual != {expected}:
+        return False, f"{experiment_id}: state modes={actual}, expected={expected}"
+    if any(s.structure_head[-1].out_channels != 7 for s in states):
+        return False, "every state must predict p + tangent(2) + connectivity(4)"
+    if expected[3] and any(torch.count_nonzero(s.state_out.weight.detach()).item() != 0 for s in states):
+        return False, "enabled state routes must retain zero-initialized residual projections"
+    return True, f"{experiment_id}: four {expected_wrapper} modules; modes={expected}"
+
+
 def test_828_structure_losses(model, config_path):
     """Numerically exercise all enabled 8.28/8.31 auxiliary structure losses."""
-    if not any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments")):
+    if not any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments", "9.3-experiments")):
         return True, "not an 8.28/8.31 config"
     # Keep this check explicit: an updated check_yaml.py combined with an old
     # ultralytics/utils/loss.py previously raised an unhelpful AttributeError.
@@ -976,7 +1050,14 @@ def test_828_structure_losses(model, config_path):
         )
 
     states = [m for m in model.modules() if m.__class__.__name__ == "SparseCrackPathState"]
-    if not states or any(m.last_guidance is None for m in states):
+    if not states:
+        weights = tuple(float(model.yaml.get(key, 0.0)) for key in (
+            "guidance_loss_weight", "orientation_loss_weight", "connectivity_loss_weight"
+        ))
+        return (True, "baseline has no structure loss") if not any(weights) else (
+            False, f"nonzero structure loss weights {weights} but no path state exists"
+        )
+    if any(m.last_guidance is None for m in states):
         return False, "dynamic path forward did not populate structure tensors"
     batch = states[0].last_guidance.shape[0]
     height, width = states[0].last_guidance.shape[-2:]
@@ -1017,7 +1098,7 @@ def test_826_gradient_reachability(model, config_path, output):
     does not reach the loss graph. This specifically guards component-ablation
     YAMLs such as W07, where a disabled role must also remove its scalar gate.
     """
-    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments", "8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments")) or output is None:
+    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments", "8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments", "9.3-experiments")) or output is None:
         return True, "not an 8.26/8.27/8.28/8.31 config"
 
     def tensors(value):
@@ -1048,13 +1129,18 @@ def test_826_gradient_reachability(model, config_path, output):
         scalar, [parameter for _, parameter in named_parameters], retain_graph=True, allow_unused=True
     )
     unused = [name for (name, _), gradient in zip(named_parameters, gradients) if gradient is None]
-    if any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments")):
+    if any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments", "9.3-experiments")):
         # Sparse path geometry is deliberately detached from the detection graph
         # because top-k/argmax/atan2 define a hard routing policy. Its structure
         # head is connected by the explicit probability/tangent/connectivity
         # losses tested immediately above, so it need not reach this output-only
         # probe a second time.
         unused = [name for name in unused if ".structure_head." not in name]
+        route_disabled = {
+            index for index, state in enumerate(states)
+            if state.__class__.__name__ == "SparseCrackPathState" and not getattr(state, "route_enabled", True)
+        }
+        unused = [name for name in unused if not any(name.startswith(f"state[{index}].") for index in route_disabled)]
     if unused:
         preview = ", ".join(unused[:8])
         suffix = f" (+{len(unused) - 8} more)" if len(unused) > 8 else ""
@@ -1110,6 +1196,9 @@ def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
 
     ok, detail = test_901_structure(model, config_path)
     results.append(("9.1 C3k2 replacement placement", ok, detail or ""))
+
+    ok, detail = test_903_structure(model, config_path)
+    results.append(("9.3 causal/family structure", ok, detail or ""))
 
     # 2. Deepcopy
     ok, detail = test_deepcopy(model, device)
@@ -1175,11 +1264,20 @@ def resolve_experiments(args):
         exp_ids.update(AUG31_FINAL_EXPERIMENTS.keys())
     if args.sep1:
         exp_ids.update(SEP1_EXPERIMENTS.keys())
+    if args.sep3:
+        exp_ids.update(SEP3_EXPERIMENTS.keys())
     if args.experiments:
         for e in args.experiments:
             exp_ids.add(e)
     if args.phase:
         phase_map = {
+            "93M": ["H00", "H01"],
+            "93A": ["H02"],
+            "93SM": ["H03", "H04", "H05"],
+            "93C": ["H06", "H07", "H08"],
+            "93W": ["H09", "H10", "H11"],
+            "93F": ["H20", "H21", "H22", "H23", "H24", "H25"],
+            "93F26": ["H26", "H27"],
             "91R": ["G00"],
             "91U": ["G01", "G02", "G03", "G04"],
             "91A": ["G05"],
@@ -1252,7 +1350,8 @@ def parse_args():
     parser.add_argument("--aug31", action="store_true", help="Check all evidence-driven Y10 fusion experiments")
     parser.add_argument("--aug31-final", action="store_true", help="Check all 8.31-final finalist/tuning experiments")
     parser.add_argument("--sep1", action="store_true", help="Check all 9.1 C3k2-replacement experiments")
-    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 91R 91U 91A, 31F 31T, or legacy")
+    parser.add_argument("--sep3", action="store_true", help="Check all 9.3 causal-ablation/family experiments")
+    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 93M/93A/93SM/93C/93W/93F/93F26, 91*, or legacy")
     parser.add_argument("--experiments", nargs="+", default=None, help="Experiment IDs: B0 S1 C2 ...")
     parser.add_argument("--exclude", nargs="+", default=None, help="IDs to exclude")
     parser.add_argument("--list", action="store_true", help="List available experiments")
@@ -1283,7 +1382,9 @@ def main():
 
     # Resolve experiments
     if args.configs:
-        targets = args.configs
+        # Accept either literal YAML paths or registered experiment IDs, as the
+        # command-line help promises (e.g. --configs H01 H04).
+        targets = [ALL_EXPERIMENTS.get(target, target) for target in args.configs]
     else:
         exp_ids = resolve_experiments(args)
         if not exp_ids:
