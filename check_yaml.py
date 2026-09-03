@@ -31,6 +31,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import yaml
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_DIR = ROOT / "ultralytics" / "cfg" / "models" / "mamba-yolo"
@@ -1018,6 +1019,27 @@ def test_903_structure(model, config_path):
     return True, f"{experiment_id}: four {expected_wrapper} modules; modes={expected}"
 
 
+def test_903_yaml_schema(config_path):
+    """Catch official-new/API-old YOLO26 argument collisions before model construction."""
+    if "9.3-experiments" not in str(config_path):
+        return True, "not a 9.3 config"
+    try:
+        with open(config_path, "r", encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+    except (OSError, yaml.YAMLError) as error:
+        return False, f"cannot parse YAML: {error}"
+    if not config.get("yolo26_compatibility_mode"):
+        return True, "not a YOLO26 compatibility config"
+    final_c3k2 = config["head"][11]
+    args = final_c3k2[3]
+    if final_c3k2[2] != "C3k2" or len(args) < 5:
+        return False, "YOLO26 compatibility layer 22 must explicitly provide c3k, e, g, shortcut"
+    groups = args[3]
+    if type(groups) is not int or groups < 1:
+        return False, f"legacy C3k2 groups must be a positive int, got {groups!r}"
+    return True, f"legacy C3k2 compatibility args are explicit (groups={groups}, shortcut={args[4]})"
+
+
 def test_828_structure_losses(model, config_path):
     """Numerically exercise all enabled 8.28/8.31 auxiliary structure losses."""
     if not any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments", "9.3-experiments")):
@@ -1158,6 +1180,11 @@ def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
     """Run all checks on a single YAML config. Returns list of (check_name, passed, detail)."""
     results = []
     config_name = Path(config_path).name if not Path(config_path).is_absolute() else Path(config_path).name
+
+    schema_ok, schema_detail = test_903_yaml_schema(config_path)
+    results.append(("9.3 YAML schema", schema_ok, schema_detail or ""))
+    if not schema_ok:
+        return results, None
 
     # 1. Build model
     model, err = build_model(config_path)
