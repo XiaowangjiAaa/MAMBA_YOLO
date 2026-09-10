@@ -1,0 +1,16 @@
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1604.rf.7229a9adfa1c9ec285d55c965172ea32.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1605.rf.53a5ea427ceda0b3d6abbc79c64efc36.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1610.rf.3271e8c1058a3a701de2d96b621e9080.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1619.rf.5a42efe0c04aca69843e73fcc3a1a1bc.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1622.rf.da42af8068237feeeaa4db6f8628ccb2.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1629.rf.3ecf969381ffe53960ebb20a47013488.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1631.rf.e30824b70361db2a9e2eb7863269ce86.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1637.rf.e941aa1b84b3d14c3ea9f48867b6676a.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1647.rf.3bab20d4aa37f4fe965fbf2cfe1622fb.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1649.rf.11669e5fb853ededb95501a2bc7e31b9.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1658.rf.38d44ec0dfa198d017ba9cb0ada57f15.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1680.rf.ae254e5b787b249ce267bcd004602f96.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1699.rf.c2735c330999d4f748d626678163e43d.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1717.rf.d1f93b3805de849c0a88c5807633fcaa.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1723.rf.7cb86469ec38c65edd8b4679b9c02062.jpg
+F:\UTS_work_code\YOLO_Yingjie\Mamba-YOLO\crack-seg\images\val\1727.rf.ca9926e973c31478021ebcf0769902cc.jpg
