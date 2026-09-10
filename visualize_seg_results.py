@@ -826,8 +826,17 @@ def main() -> int:
     model, load_description = load_model(weights, model_yaml)
     print(f"Model:   {load_description}")
 
+    # Passing thousands of paths as a Python list makes Ultralytics' autocast_list
+    # call PIL.Image.open() for every image at once and can exceed Linux's open-file
+    # limit. A TXT manifest selects LoadImagesAndVideos instead, which opens only
+    # one inference batch at a time and also makes the resolved input set auditable.
+    source_manifest = output_dir / "resolved_images.txt"
+    with source_manifest.open("w", encoding="utf-8", newline="\n") as stream:
+        for image_path in images:
+            stream.write(f"{image_path}\n")
+
     predict_kwargs = dict(
-        source=[str(path) for path in images],
+        source=str(source_manifest),
         stream=True,
         imgsz=args.imgsz,
         conf=args.conf,
