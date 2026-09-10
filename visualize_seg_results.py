@@ -26,6 +26,7 @@ import csv
 import glob
 import json
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -103,6 +104,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-json", action="store_true", help="Also save summary_metrics.json")
     parser.add_argument("--no-images", action="store_true", help="Calculate CSV metrics without saving overlays")
     return parser.parse_args()
+
+
+def prepare_device_environment(device) -> Optional[str]:
+    """Fix CUDA visibility before Ultralytics imports torch.
+
+    PyTorch queues a CUDA capability check during import. Changing
+    CUDA_VISIBLE_DEVICES after that import can make the queued check retain a
+    stale device count (for example, checking device 1 after only device 0 is
+    visible). This script imports Ultralytics lazily, so visibility can safely
+    be fixed here first.
+    """
+    requested = str(device).strip().lower().replace("cuda:", "")
+    previous = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if requested == "cpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    elif requested == "cuda":
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    elif requested and requested not in {"none", "mps", "mps:0"}:
+        compact = requested.replace(" ", "")
+        if all(part.isdigit() for part in compact.split(",")):
+            os.environ["CUDA_VISIBLE_DEVICES"] = compact
+    return previous
 
 
 def is_dataset_yaml(path: Path) -> bool:
@@ -762,6 +785,7 @@ def write_csv(path: Path, rows: Sequence[dict], fieldnames: Sequence[str]) -> No
 
 def main() -> int:
     args = parse_args()
+    previous_cuda_visible = prepare_device_environment(args.device)
     if cv2 is None:
         raise ModuleNotFoundError(
             "OpenCV is required. Activate the project environment or install opencv-python>=4.6.0."
@@ -793,6 +817,12 @@ def main() -> int:
     print(f"Mode:    {'dataset YAML / ' + args.split if dataset_mode else 'image source'}")
     print(f"Images:  {len(images)}")
     print(f"Output:  {output_dir}")
+    if str(args.device).lower() != "cpu":
+        print(
+            f"CUDA:    requested={args.device}, "
+            f"visible={os.environ.get('CUDA_VISIBLE_DEVICES', '<unchanged>')} "
+            f"(previous={previous_cuda_visible or '<unset>'})"
+        )
     model, load_description = load_model(weights, model_yaml)
     print(f"Model:   {load_description}")
 
