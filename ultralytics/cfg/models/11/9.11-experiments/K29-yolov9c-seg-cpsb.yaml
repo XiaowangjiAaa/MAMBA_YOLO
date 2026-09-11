@@ -1,0 +1,35 @@
+# YOLOv9c-Seg: preserve each backbone RepNCSPELAN4 host and append one unchanged CPSB core.
+nc: 1
+guidance_loss_weight: 0.1
+guidance_dice_weight: 1.0
+orientation_loss_weight: 0.01
+connectivity_loss_weight: 0.03
+p2: &p2 [256, 128, 64, 1, 0.25, 0.02, 128, 3, 0.05, 0.02, 0.50, 8, 0.05, 0.50, 0.05, 0.50, 0.05, 0.25, 3, 0.01, adaptive, poc, full, True]
+p3: &p3 [512, 256, 128, 1, 0.25, 0.02, 128, 3, 0.05, 0.02, 0.50, 8, 0.05, 0.50, 0.05, 0.50, 0.05, 0.25, 3, 0.01, adaptive, poc, full, True]
+p4: &p4 [512, 512, 256, 1, 0.25, 0.02, 128, 3, 0.05, 0.02, 0.50, 8, 0.05, 0.50, 0.05, 0.50, 0.05, 0.25, 3, 0.01, adaptive, poc, full, True]
+backbone:
+  - [-1, 1, Conv, [64, 3, 2]]
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [-1, 1, AdaptiveRepNCSPELAN4CrackPath, *p2]
+  - [-1, 1, ADown, [256]]
+  - [-1, 1, AdaptiveRepNCSPELAN4CrackPath, *p3]
+  - [-1, 1, ADown, [512]]
+  - [-1, 1, AdaptiveRepNCSPELAN4CrackPath, *p4]
+  - [-1, 1, ADown, [512]]
+  - [-1, 1, AdaptiveRepNCSPELAN4CrackPath, *p4]
+  - [-1, 1, SPPELAN, [512, 256]]
+head:
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 6], 1, Concat, [1]]
+  - [-1, 1, RepNCSPELAN4, [512, 512, 256, 1]]
+  - [-1, 1, nn.Upsample, [None, 2, nearest]]
+  - [[-1, 4], 1, Concat, [1]]
+  - [-1, 1, RepNCSPELAN4, [256, 256, 128, 1]]
+  - [-1, 1, ADown, [256]]
+  - [[-1, 12], 1, Concat, [1]]
+  - [-1, 1, RepNCSPELAN4, [512, 512, 256, 1]]
+  - [-1, 1, ADown, [512]]
+  - [[-1, 9], 1, Concat, [1]]
+  - [-1, 1, RepNCSPELAN4, [512, 512, 256, 1]]
+  - [[15, 18, 21], 1, Segment, [nc, 32, 256]]
+

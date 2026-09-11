@@ -1,0 +1,22 @@
+# 9.11 CPSB ablation programme; primary metric is Mask mAP50; default seed=1.
+
+# 0) Pre-flight. CPU fallback: --device cpu --imgsz 128 --stub-scan
+python check_yaml.py --sep11 --quick --device cuda:0
+
+# 1) Scan: K01 adaptive reference plus raster/cross/serpentine/diagonal/fixed
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 911S --experiments K01 --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --skip-completed --continue-on-error
+
+# 2) Memory: standard/Delta/Delta+transition/Delta+write/full K01
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 911M --experiments K01 --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --skip-completed --continue-on-error
+
+# 3) Placement: native, stage/pair, all backbone, neck-only, backbone+neck
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 911P --experiments K00 K01 --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --skip-completed --continue-on-error
+
+# 4) Generalisation: YOLOv9c, YOLOv5n, YOLOv8n and YOLO12n pairs; YOLO11 uses K00/K01
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 911G --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --skip-completed --continue-on-error
+
+# 5) Optional compatibility-only YOLO26 pair; not native YOLO26 evidence
+python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 911G26 --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --skip-completed --continue-on-error
+
+# Single experiment
+python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments K03 --seeds 1 --device 0,1 --batch-size 16 --workers 16 --epochs 300 --patience 100 --skip-completed

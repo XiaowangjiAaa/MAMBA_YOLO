@@ -1,6 +1,7 @@
 # Training Command Archive
 
 - [All commands](train_commands.txt)
+- [9.11 CPSB three-part ablation programme](train_commands_9.11.txt)
 - [8.12 experiments](train_commands_8.12.txt)
 - [8.17 experiments](train_commands_8.17.txt)
 - [8.19 experiments](train_commands_8.19.txt)

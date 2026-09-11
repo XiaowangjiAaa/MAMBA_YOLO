@@ -1,5 +1,5 @@
 from .common_utils_mbyolo import *
-from .block import Bottleneck, C3k
+from .block import A2C2f, Bottleneck, C3k, RepNCSPELAN4
 from .conv import Conv
 import torch.nn.functional as F
 
@@ -24,6 +24,8 @@ __all__ = (
     "AdaptiveC3k2CrackPath",
     "AdaptiveC2fCrackPath",
     "AdaptiveC3CrackPath",
+    "AdaptiveA2C2fCrackPath",
+    "AdaptiveRepNCSPELAN4CrackPath",
     "CrackDetailStemLite",
     "CrackDetailStemDirectional",
     "CrackMergeLite",
@@ -1341,8 +1343,9 @@ class SparseCrackPathState(nn.Module):
         self.cue_mode = str(cue_mode).lower()
         self.memory_mode = str(memory_mode).lower()
         self.route_enabled = bool(route_enabled)
-        if self.path_mode not in {"adaptive", "fixed"}:
-            raise ValueError("path_mode must be 'adaptive' or 'fixed'")
+        valid_path_modes = {"adaptive", "fixed", "raster", "cross", "serpentine", "diagonal"}
+        if self.path_mode not in valid_path_modes:
+            raise ValueError(f"path_mode must be one of {sorted(valid_path_modes)}, got {path_mode!r}")
         if self.cue_mode not in {"p", "po", "pc", "poc"}:
             raise ValueError("cue_mode must be one of: p, po, pc, poc")
         if not 0.0 < self.seed_ratio <= 1.0:
@@ -1404,12 +1407,15 @@ class SparseCrackPathState(nn.Module):
         self.visual_guidance = None
         self.visual_orientation = None
         self.visual_connectivity = None
+        self._ordered_cache_key = None
+        self._ordered_cache = None
 
     def __getstate__(self):
         state = self.__dict__.copy()
         for name in (
             "last_guidance", "last_orientation", "last_connectivity", "last_path_indices",
-            "last_path_mask", "visual_guidance", "visual_orientation", "visual_connectivity"
+            "last_path_mask", "visual_guidance", "visual_orientation", "visual_connectivity",
+            "_ordered_cache_key", "_ordered_cache",
         ):
             state.pop(name, None)
         return state
@@ -1420,6 +1426,65 @@ class SparseCrackPathState(nn.Module):
     @staticmethod
     def _gather_flat(field, indices):
         return field.flatten(2).gather(2, indices[:, None].expand(-1, field.shape[1], -1))
+
+    def _ordered_paths(self, probability, seeds):
+        """Build seed-centred, equal-budget paths from a conventional 2-D scan order.
+
+        Every method receives the same seeds and maximum ``2 * path_steps + 1``
+        tokens per path.  This makes raster/cross/serpentine/diagonal useful as
+        controlled scan-order ablations without turning the short-path CPSB into
+        an impractically expensive dense image scan.
+        """
+        batch, _, height, width = probability.shape
+        device = probability.device
+        cache_key = (self.path_mode, height, width, device.type, device.index)
+        cached = getattr(self, "_ordered_cache", None)
+        if getattr(self, "_ordered_cache_key", None) == cache_key and cached is not None:
+            orders, inverse = cached
+        else:
+            grid = torch.arange(height * width, device=device).view(height, width)
+            if self.path_mode == "raster":
+                orders = grid.reshape(1, -1)
+            elif self.path_mode == "serpentine":
+                snake = grid.clone()
+                snake[1::2] = snake[1::2].flip(1)
+                orders = snake.reshape(1, -1)
+            elif self.path_mode == "cross":
+                # Row-major and column-major orders; bidirectional SSM evaluation
+                # supplies the reverse pair, matching the four-family Cross Scan.
+                orders = torch.stack((grid.reshape(-1), grid.t().reshape(-1)), dim=0)
+            elif self.path_mode == "diagonal":
+                diagonals = []
+                for diagonal_id in range(height + width - 1):
+                    row_start = max(0, diagonal_id - width + 1)
+                    row_end = min(height - 1, diagonal_id)
+                    rows = torch.arange(row_start, row_end + 1, device=device)
+                    cols = diagonal_id - rows
+                    values = grid[rows, cols]
+                    diagonals.append(values.flip(0) if diagonal_id % 2 else values)
+                orders = torch.cat(diagonals).reshape(1, -1)
+            else:
+                raise RuntimeError(f"ordered paths do not support mode {self.path_mode!r}")
+            inverse = torch.empty_like(orders)
+            ranks = torch.arange(orders.shape[1], device=device).expand(orders.shape[0], -1)
+            inverse.scatter_(1, orders, ranks)
+            self._ordered_cache_key = cache_key
+            self._ordered_cache = (orders, inverse)
+
+        family_count, token_count = orders.shape
+        path_count = seeds.shape[1]
+        families = torch.arange(path_count, device=device).remainder(family_count)
+        seed_ranks = inverse[families[None, :], seeds]
+        offsets = torch.arange(-self.path_steps, self.path_steps + 1, device=device)
+        path_ranks = seed_ranks[..., None] + offsets
+        valid_mask = (path_ranks >= 0) & (path_ranks < token_count)
+        safe_ranks = path_ranks.clamp(0, token_count - 1)
+        family_orders = orders[families][None].expand(batch, -1, -1)
+        indices = family_orders.gather(2, safe_ranks)
+        indices = torch.where(valid_mask, indices, seeds[..., None])
+        predecessor = probability.new_zeros(valid_mask.shape)
+        predecessor[..., 1:] = (valid_mask[..., 1:] & valid_mask[..., :-1]).to(probability.dtype)
+        return indices, predecessor, valid_mask
 
     def _trace(self, probability, orientation, connectivity, seeds, sign):
         batch, _, height, width = probability.shape
@@ -1518,18 +1583,21 @@ class SparseCrackPathState(nn.Module):
         batch, _, height, width = feature.shape
         path_count = min(self.max_paths, max(1, int(round(height * width * self.seed_ratio))))
         seeds = probability.detach().flatten(1).topk(path_count, dim=1).indices
-        backward_idx, backward_edge, backward_mask = self._trace(
-            probability, orientation, connectivity, seeds, -1
-        )
-        forward_idx, forward_edge, forward_mask = self._trace(
-            probability, orientation, connectivity, seeds, 1
-        )
-        reverse_transition = torch.cat(
-            (backward_edge.new_zeros((*backward_edge.shape[:2], 1)), backward_edge[..., 1:].flip(-1)), dim=-1
-        )
-        indices = torch.cat((backward_idx[..., 1:].flip(-1), forward_idx), dim=-1)
-        predecessor = torch.cat((reverse_transition, forward_edge[..., 1:]), dim=-1)
-        valid_mask = torch.cat((backward_mask[..., 1:].flip(-1), forward_mask), dim=-1)
+        if self.path_mode in {"raster", "cross", "serpentine", "diagonal"}:
+            indices, predecessor, valid_mask = self._ordered_paths(probability, seeds)
+        else:
+            backward_idx, backward_edge, backward_mask = self._trace(
+                probability, orientation, connectivity, seeds, -1
+            )
+            forward_idx, forward_edge, forward_mask = self._trace(
+                probability, orientation, connectivity, seeds, 1
+            )
+            reverse_transition = torch.cat(
+                (backward_edge.new_zeros((*backward_edge.shape[:2], 1)), backward_edge[..., 1:].flip(-1)), dim=-1
+            )
+            indices = torch.cat((backward_idx[..., 1:].flip(-1), forward_idx), dim=-1)
+            predecessor = torch.cat((reverse_transition, forward_edge[..., 1:]), dim=-1)
+            valid_mask = torch.cat((backward_mask[..., 1:].flip(-1), forward_mask), dim=-1)
         flat_indices = indices.reshape(batch, -1)
         path_feature = self._gather_flat(feature, flat_indices).view(
             batch, feature.shape[1], path_count, -1
@@ -1701,6 +1769,55 @@ class AdaptiveC3CrackPath(nn.Module):
 
     def forward(self, x):
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
+
+
+class AdaptiveRepNCSPELAN4CrackPath(nn.Module):
+    """YOLOv9 RepNCSPELAN4-compatible host followed by the unchanged CPSB core."""
+
+    def __init__(self, c1, c2, c3, c4, n=1, state_ratio=0.25,
+                 seed_ratio=0.02, max_paths=128, path_steps=3, path_min_conf=0.05,
+                 route_init=0.02, route_max=0.5, d_state=8,
+                 memory_init=0.05, memory_max=0.5, transition_init=0.05,
+                 transition_max=0.5, write_init=0.05, write_max=0.25,
+                 structure_kernel=3, structure_init_std=0.01,
+                 path_mode="adaptive", cue_mode="poc", memory_mode="full", route_enabled=True):
+        super().__init__()
+        self.host = RepNCSPELAN4(c1, c2, c3, c4, n)
+        self.path = SparseCrackPathState(
+            c2, state_ratio, seed_ratio, max_paths, path_steps, path_min_conf,
+            route_init, route_max, d_state, memory_init, memory_max,
+            transition_init, transition_max, write_init, write_max,
+            structure_kernel, structure_init_std, path_mode, cue_mode,
+            memory_mode, route_enabled,
+        )
+
+    def forward(self, x):
+        return self.path(self.host(x))
+
+
+class AdaptiveA2C2fCrackPath(nn.Module):
+    """YOLO12 A2C2f-compatible host followed by the unchanged CPSB core."""
+
+    def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False,
+                 mlp_ratio=2.0, e=0.5, g=1, shortcut=True, state_ratio=0.25,
+                 seed_ratio=0.02, max_paths=128, path_steps=3, path_min_conf=0.05,
+                 route_init=0.02, route_max=0.5, d_state=8,
+                 memory_init=0.05, memory_max=0.5, transition_init=0.05,
+                 transition_max=0.5, write_init=0.05, write_max=0.25,
+                 structure_kernel=3, structure_init_std=0.01,
+                 path_mode="adaptive", cue_mode="poc", memory_mode="full", route_enabled=True):
+        super().__init__()
+        self.host = A2C2f(c1, c2, n, a2, area, residual, mlp_ratio, e, g, shortcut)
+        self.path = SparseCrackPathState(
+            c2, state_ratio, seed_ratio, max_paths, path_steps, path_min_conf,
+            route_init, route_max, d_state, memory_init, memory_max,
+            transition_init, transition_max, write_init, write_max,
+            structure_kernel, structure_init_std, path_mode, cue_mode,
+            memory_mode, route_enabled,
+        )
+
+    def forward(self, x):
+        return self.path(self.host(x))
 
 
 class SimpleStem(nn.Module):

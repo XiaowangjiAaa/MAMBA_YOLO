@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from ultralytics.nn.modules import (
     AIFI,
+    A2C2f,
     C1,
     C2,
     C3,
@@ -75,6 +76,8 @@ from ultralytics.nn.modules import (
     AdaptiveC3k2CrackPath,
     AdaptiveC2fCrackPath,
     AdaptiveC3CrackPath,
+    AdaptiveA2C2fCrackPath,
+    AdaptiveRepNCSPELAN4CrackPath,
     AdaptiveC2fCASP,
     CrackDetailStemLite,
     CrackDetailStemDirectional,
@@ -916,6 +919,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C1,
             C2,
             C2f,
+            A2C2f,
             C3k,
             C3k2,
             RepNCSPELAN4,
@@ -937,6 +941,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             UnifiedCrackAwareVSSBlock, CrackDetailStemLite, CrackDetailStemDirectional,
             LastUnifiedCrackAwareVSSStage, EfficientCrackAlignedState, AdaptiveC3k2CASP,
             AdaptiveC3k2CrackPath, AdaptiveC2fCrackPath, AdaptiveC3CrackPath,
+            AdaptiveA2C2fCrackPath, AdaptiveRepNCSPELAN4CrackPath,
             AdaptiveC2fCASP,
             CrackMergeLite, CrackMergeDirectional
         }:
@@ -953,6 +958,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if m in {
                 BottleneckCSP, C1, C2, C2f, C3k, C3k2, AdaptiveC3k2CASP,
                 AdaptiveC3k2CrackPath, AdaptiveC2fCrackPath, AdaptiveC3CrackPath,
+                A2C2f, AdaptiveA2C2fCrackPath,
                 AdaptiveC2fCASP,
                 C2fAttn, C3, C3TR, C3Ghost, C3x, RepC3, XSSBlock,
                 CrackXSSBlock, CrackXSSBlockV2, LastCrackWriteVSSStage, LastCenteredCrackWriteVSSStage,

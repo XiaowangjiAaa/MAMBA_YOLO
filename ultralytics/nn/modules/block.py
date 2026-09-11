@@ -582,6 +582,92 @@ class BNContrastiveHead(nn.Module):
         return x * self.logit_scale.exp() + self.bias
 
 
+class AAttn(nn.Module):
+    """YOLO12 area attention, backported from the official Ultralytics implementation."""
+
+    def __init__(self, dim, num_heads, area=1):
+        super().__init__()
+        self.area = int(area)
+        self.num_heads = int(num_heads)
+        self.head_dim = dim // self.num_heads
+        self.all_head_dim = self.head_dim * self.num_heads
+        self.qkv = Conv(dim, self.all_head_dim * 3, 1, act=False)
+        self.proj = Conv(self.all_head_dim, dim, 1, act=False)
+        self.pe = Conv(self.all_head_dim, self.all_head_dim, 7, 1, 3, g=self.all_head_dim, act=False)
+
+    def forward(self, x):
+        batch, _, height, width = x.shape
+        tokens = height * width
+        qkv = self.qkv(x).flatten(2).transpose(1, 2)
+        if self.area > 1:
+            qkv = qkv.reshape(batch * self.area, tokens // self.area, self.all_head_dim * 3)
+            batch, tokens, _ = qkv.shape
+        query, key, value = (
+            qkv.view(batch, tokens, self.num_heads, self.head_dim * 3)
+            .permute(0, 2, 3, 1)
+            .split([self.head_dim] * 3, dim=2)
+        )
+        attention = ((query * (self.head_dim ** -0.5)).transpose(-2, -1) @ key).softmax(dim=-1)
+        output = (value @ attention.transpose(-2, -1)).permute(0, 3, 1, 2)
+        value = value.permute(0, 3, 1, 2)
+        if self.area > 1:
+            output = output.reshape(batch // self.area, tokens * self.area, self.all_head_dim)
+            value = value.reshape(batch // self.area, tokens * self.area, self.all_head_dim)
+            batch, tokens, _ = output.shape
+        output = output.reshape(batch, height, width, self.all_head_dim).permute(0, 3, 1, 2).contiguous()
+        value = value.reshape(batch, height, width, self.all_head_dim).permute(0, 3, 1, 2).contiguous()
+        return self.proj(output + self.pe(value))
+
+
+class ABlock(nn.Module):
+    """YOLO12 area-attention residual block."""
+
+    def __init__(self, dim, num_heads, mlp_ratio=1.2, area=1):
+        super().__init__()
+        self.attn = AAttn(dim, num_heads, area)
+        hidden = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(Conv(dim, hidden, 1), Conv(hidden, dim, 1, act=False))
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _init_weights(module):
+        if isinstance(module, nn.Conv2d):
+            nn.init.trunc_normal_(module.weight, std=0.02)
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
+
+    def forward(self, x):
+        x = x + self.attn(x)
+        return x + self.mlp(x)
+
+
+class A2C2f(nn.Module):
+    """YOLO12 R-ELAN shell with area attention or C3k processing."""
+
+    def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False,
+                 mlp_ratio=2.0, e=0.5, g=1, shortcut=True):
+        super().__init__()
+        hidden = int(c2 * e)
+        if hidden % 32:
+            raise ValueError("A2C2f hidden channels must be a multiple of 32")
+        self.cv1 = Conv(c1, hidden, 1, 1)
+        self.cv2 = Conv((1 + n) * hidden, c2, 1)
+        self.gamma = nn.Parameter(0.01 * torch.ones(c2)) if a2 and residual else None
+        self.m = nn.ModuleList(
+            nn.Sequential(*(ABlock(hidden, hidden // 32, mlp_ratio, area) for _ in range(2)))
+            if a2 else C3k(hidden, hidden, 2, shortcut, g)
+            for _ in range(n)
+        )
+
+    def forward(self, x):
+        outputs = [self.cv1(x)]
+        outputs.extend(module(outputs[-1]) for module in self.m)
+        output = self.cv2(torch.cat(outputs, dim=1))
+        if self.gamma is not None:
+            return x + self.gamma.view(1, -1, 1, 1) * output
+        return output
+
+
 class RepBottleneck(Bottleneck):
     """Rep bottleneck."""
 

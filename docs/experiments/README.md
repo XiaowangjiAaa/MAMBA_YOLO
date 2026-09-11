@@ -2,6 +2,8 @@
 
 Read the documents chronologically:
 
+- [9.11 CPSB three-part ablation and generalisation programme](9.11_CPSB_THREE_PART_ABLATION_PROGRAM.md) (current)
+
 1. [Initial Scan/Memory design](README_CRACK_STRUCTURE_EXPERIMENTS.md)
 2. [8.9 results and next experiments](8.9_CRACK_STRUCTURE_RESULTS_AND_NEXT_EXPERIMENTS.md)
 3. [8.12 unified redesign](8.12_CRACK_MAMBA_UNIFIED_REDESIGN.md)

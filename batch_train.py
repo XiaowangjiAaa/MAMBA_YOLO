@@ -422,6 +422,43 @@ SEP3_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(SEP3_EXPERIMENTS)
 
+# 9.11: CPSB evidence is organised in the order required by a formal ablation:
+# internal Scan -> internal Memory -> placement -> YOLO-family portability.
+# Frozen YAMLs are intentionally reused where the architecture is identical.
+SEP11_EXPERIMENTS = {
+    "K00": {"config": "../11/9.3-experiments/H00-yolo11n-seg-baseline.yaml", "desc": "Native YOLO11n-Seg reference", "phase": "911B"},
+    "K01": {"config": "../11/9.3-experiments/H01-g01-full.yaml", "desc": "Complete CPSB: adaptive crack path + full memory", "phase": "911CORE"},
+    "K02": {"config": "../11/9.11-experiments/K02-raster-scan.yaml", "desc": "Equal-budget raster scan", "phase": "911S"},
+    "K03": {"config": "../11/9.11-experiments/K03-cross-scan.yaml", "desc": "Equal-budget bidirectional Cross Scan", "phase": "911S"},
+    "K04": {"config": "../11/9.11-experiments/K04-serpentine-scan.yaml", "desc": "Equal-budget serpentine scan", "phase": "911S"},
+    "K05": {"config": "../11/9.11-experiments/K05-diagonal-scan.yaml", "desc": "Equal-budget diagonal zigzag scan", "phase": "911S"},
+    "K06": {"config": "../11/9.11-experiments/K06-fixed-straight-scan.yaml", "desc": "Legacy fixed straight sparse paths", "phase": "911S"},
+    "K10": {"config": "../11/9.3-experiments/H04-adaptive-standard.yaml", "desc": "Adaptive scan + standard Mamba memory", "phase": "911M"},
+    "K11": {"config": "../11/9.3-experiments/H09-memory-retention.yaml", "desc": "Crack-aware Delta retention only", "phase": "911M"},
+    "K12": {"config": "../11/9.3-experiments/H10-memory-retention-transition.yaml", "desc": "Delta retention + edge transition", "phase": "911M"},
+    "K13": {"config": "../11/9.3-experiments/H11-memory-retention-write.yaml", "desc": "Delta retention + crack write", "phase": "911M"},
+    "K20": {"config": "../11/9.11-experiments/K20-backbone-p3-only.yaml", "desc": "CPSB at backbone P3 only", "phase": "911P"},
+    "K21": {"config": "../11/9.11-experiments/K21-backbone-p4-only.yaml", "desc": "CPSB at backbone P4 only", "phase": "911P"},
+    "K22": {"config": "../11/9.1-experiments/G00-z04-placement-reference.yaml", "desc": "CPSB at backbone P3+P4", "phase": "911P"},
+    "K23": {"config": "../11/9.11-experiments/K23-backbone-p2-p3.yaml", "desc": "CPSB at shallow backbone P2+P3", "phase": "911P"},
+    "K24": {"config": "../11/9.11-experiments/K24-backbone-p4-p5.yaml", "desc": "CPSB at deep backbone P4+P5", "phase": "911P"},
+    "K26": {"config": "../11/9.11-experiments/K26-neck-only.yaml", "desc": "CPSB at all neck fusion blocks only", "phase": "911P"},
+    "K27": {"config": "../11/9.1-experiments/G04-z04-all-c3k2.yaml", "desc": "CPSB in complete backbone and neck", "phase": "911P"},
+    "K28": {"config": "../11/9.11-experiments/K28-yolov9c-seg-baseline.yaml", "desc": "Native YOLOv9c-Seg paired baseline", "phase": "911G"},
+    "K29": {"config": "../11/9.11-experiments/K29-yolov9c-seg-cpsb.yaml", "desc": "YOLOv9c + RepNCSPELAN4-compatible CPSB", "phase": "911G"},
+    "K30": {"config": "../11/9.3-experiments/H20-yolov5n-seg-baseline.yaml", "desc": "YOLOv5n paired baseline", "phase": "911G"},
+    "K31": {"config": "../11/9.3-experiments/H21-yolov5n-seg-crackpath.yaml", "desc": "YOLOv5n + CPSB-compatible C3 shell", "phase": "911G"},
+    "K32": {"config": "../11/9.3-experiments/H22-yolov8n-seg-baseline.yaml", "desc": "YOLOv8n paired baseline", "phase": "911G"},
+    "K33": {"config": "../11/9.3-experiments/H23-yolov8n-seg-crackpath.yaml", "desc": "YOLOv8n + CPSB-compatible C2f shell", "phase": "911G"},
+    "K34": {"config": "../11/9.3-experiments/H24-yolo11n-seg-baseline.yaml", "desc": "YOLO11n paired baseline alias; reuse K00 result", "phase": "911GA"},
+    "K35": {"config": "../11/9.3-experiments/H25-yolo11n-seg-crackpath.yaml", "desc": "YOLO11n CPSB alias; reuse K01 result", "phase": "911GA"},
+    "K36": {"config": "../11/9.3-experiments/H26-yolo26n-seg-compat-baseline.yaml", "desc": "YOLO26n compatibility baseline", "phase": "911G26"},
+    "K37": {"config": "../11/9.3-experiments/H27-yolo26n-seg-compat-crackpath.yaml", "desc": "YOLO26n compatibility + CPSB", "phase": "911G26"},
+    "K38": {"config": "../11/9.11-experiments/K38-yolo12n-seg-baseline.yaml", "desc": "Official-architecture YOLO12n-Seg baseline", "phase": "911G"},
+    "K39": {"config": "../11/9.11-experiments/K39-yolo12n-seg-cpsb.yaml", "desc": "YOLO12n + C3k2/A2C2f-compatible CPSB", "phase": "911G"},
+}
+ALL_EXPERIMENTS.update(SEP11_EXPERIMENTS)
+
 
 def load_status():
     if STATUS_FILE.exists():
@@ -460,7 +497,9 @@ def parse_epoch_progress(line, total_epochs):
 
 def get_run_location(exp_name, args):
     """Return the absolute project directory and stable run name for an experiment/seed."""
-    if exp_name in SEP3_EXPERIMENTS:
+    if exp_name in SEP11_EXPERIMENTS:
+        default_project = f"./output_dir/{args.data_stem}-9.11"
+    elif exp_name in SEP3_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-9.3"
     elif exp_name in SEP1_EXPERIMENTS:
         default_project = f"./output_dir/{args.data_stem}-9.1"
@@ -861,6 +900,12 @@ Usage examples:
 
   # Train with resume/skip support
   python batch_train.py --data ../crack-seg/crack-seg.yaml --experiments B0 S1 S2 --skip-completed --continue-on-error
+
+  # 9.11: Scan, Memory, placement, then cross-family generalisation (seed=1)
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 911S --experiments K01
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 911M --experiments K01
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 911P --experiments K00 K01
+  python batch_train.py --data ../crack-seg/crack-seg.yaml --phase 911G
         """,
     )
 
@@ -869,7 +914,7 @@ Usage examples:
     exp_group.add_argument("--experiments", nargs="+", default=None,
                            help="Specific experiment IDs to run (e.g. B0 S1 S2)")
     exp_group.add_argument("--phase", nargs="+", default=None,
-                           help="Run phases 93M/93A/93SM/93C/93W/93F/93F26 (93FA is alias-only), 91*, or legacy")
+                           help="Run phases 911B/911CORE/911S/911M/911P/911G/911G26, 93*, or legacy")
     exp_group.add_argument("--exclude", nargs="+", default=None,
                            help="Experiment IDs to exclude")
 
@@ -960,15 +1005,18 @@ def resolve_experiments(args):
                 if str(info["phase"]) == p:
                     exp_ids.add(eid)
     if not exp_ids and not args.list and not args.experiments and not args.phase:
-        # Default: run the current 9.3 program. Prefer explicit --phase in production.
-        exp_ids = set(SEP3_EXPERIMENTS.keys()) - {"H24", "H25"}
+        # Default: current 9.11 programme, excluding duplicate aliases and the
+        # explicitly compatibility-only YOLO26 pair.
+        exp_ids = set(SEP11_EXPERIMENTS.keys()) - {"K34", "K35", "K36", "K37"}
 
     if args.exclude:
         for e in args.exclude:
             exp_ids.discard(e)
 
     # Sort by phase then by name for a sensible order
-    phase_order = {"93M": -10, "93A": -9, "93SM": -8, "93C": -7, "93W": -6,
+    phase_order = {"911B": -20, "911CORE": -19, "911S": -18, "911M": -17,
+                   "911P": -16, "911G": -15, "911G26": -14, "911GA": -13,
+                   "93M": -10, "93A": -9, "93SM": -8, "93C": -7, "93W": -6,
                    "93F": -5, "93F26": -4, "93FA": -3, "91R": -3, "91U": -2, "91A": -1,
                    "31F": -2, "31T": -1, "31R": 0, "31C": 1, "31P": 2, "31M": 3,
                    "28F": 4, "28S": 5, "28L": 6, "28M": 7,

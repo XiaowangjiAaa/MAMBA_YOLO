@@ -93,7 +93,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--max-images", type=int, default=0, help="0 means all images")
     parser.add_argument("--recursive", action="store_true", help="Recursively scan a direct image directory")
-    parser.add_argument("--alpha", type=float, default=0.42, help="Mask overlay opacity")
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.5,
+        help="Mask overlay opacity (0.5 matches the Ultralytics default)",
+    )
     parser.add_argument("--line-width", type=int, default=2)
     parser.add_argument(
         "--visual-style",
@@ -628,15 +633,27 @@ class DatasetAPAccumulator:
         return threshold_maps[0], float(np.mean(threshold_maps)), details
 
 
-INSTANCE_COLORS = (
-    (255, 42, 4),    # Ultralytics-like blue in OpenCV BGR order
+ULTRALYTICS_CLASS_COLORS_BGR = (
+    (255, 42, 4),
     (235, 219, 11),
-    (0, 219, 255),
-    (0, 212, 187),
-    (255, 111, 221),
+    (243, 243, 243),
+    (183, 223, 0),
+    (104, 31, 17),
+    (221, 111, 255),
     (79, 68, 255),
-    (138, 0, 255),
-    (255, 178, 29),
+    (0, 237, 204),
+    (68, 243, 0),
+    (255, 0, 189),
+    (255, 180, 0),
+    (186, 0, 221),
+    (255, 255, 0),
+    (0, 192, 38),
+    (179, 255, 1),
+    (255, 36, 125),
+    (104, 0, 123),
+    (108, 27, 255),
+    (47, 109, 252),
+    (11, 255, 162),
 )
 
 
@@ -665,7 +682,7 @@ def instance_visualization(
     # Blend every instance independently so different classes remain visually separable.
     for index, mask in enumerate(pred_masks):
         class_id = int(pred_classes[index])
-        color = INSTANCE_COLORS[class_id % len(INSTANCE_COLORS)]
+        color = ULTRALYTICS_CLASS_COLORS_BGR[class_id % len(ULTRALYTICS_CLASS_COLORS_BGR)]
         active = mask.astype(bool)
         if active.any():
             color_layer = np.empty_like(canvas)
@@ -677,7 +694,7 @@ def instance_visualization(
 
     for index, box in enumerate(boxes):
         class_id = int(pred_classes[index])
-        color = INSTANCE_COLORS[class_id % len(INSTANCE_COLORS)]
+        color = ULTRALYTICS_CLASS_COLORS_BGR[class_id % len(ULTRALYTICS_CLASS_COLORS_BGR)]
         x1, y1, x2, y2 = box.round().astype(int)
         x1 = int(np.clip(x1, 0, image.shape[1] - 1))
         y1 = int(np.clip(y1, 0, image.shape[0] - 1))

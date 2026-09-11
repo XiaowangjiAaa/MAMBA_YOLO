@@ -277,6 +277,40 @@ SEP3_EXPERIMENTS = {
 }
 ALL_EXPERIMENTS.update(SEP3_EXPERIMENTS)
 
+SEP11_EXPERIMENTS = {
+    "K00": "../11/9.3-experiments/H00-yolo11n-seg-baseline.yaml",
+    "K01": "../11/9.3-experiments/H01-g01-full.yaml",
+    "K02": "../11/9.11-experiments/K02-raster-scan.yaml",
+    "K03": "../11/9.11-experiments/K03-cross-scan.yaml",
+    "K04": "../11/9.11-experiments/K04-serpentine-scan.yaml",
+    "K05": "../11/9.11-experiments/K05-diagonal-scan.yaml",
+    "K06": "../11/9.11-experiments/K06-fixed-straight-scan.yaml",
+    "K10": "../11/9.3-experiments/H04-adaptive-standard.yaml",
+    "K11": "../11/9.3-experiments/H09-memory-retention.yaml",
+    "K12": "../11/9.3-experiments/H10-memory-retention-transition.yaml",
+    "K13": "../11/9.3-experiments/H11-memory-retention-write.yaml",
+    "K20": "../11/9.11-experiments/K20-backbone-p3-only.yaml",
+    "K21": "../11/9.11-experiments/K21-backbone-p4-only.yaml",
+    "K22": "../11/9.1-experiments/G00-z04-placement-reference.yaml",
+    "K23": "../11/9.11-experiments/K23-backbone-p2-p3.yaml",
+    "K24": "../11/9.11-experiments/K24-backbone-p4-p5.yaml",
+    "K26": "../11/9.11-experiments/K26-neck-only.yaml",
+    "K27": "../11/9.1-experiments/G04-z04-all-c3k2.yaml",
+    "K28": "../11/9.11-experiments/K28-yolov9c-seg-baseline.yaml",
+    "K29": "../11/9.11-experiments/K29-yolov9c-seg-cpsb.yaml",
+    "K30": "../11/9.3-experiments/H20-yolov5n-seg-baseline.yaml",
+    "K31": "../11/9.3-experiments/H21-yolov5n-seg-crackpath.yaml",
+    "K32": "../11/9.3-experiments/H22-yolov8n-seg-baseline.yaml",
+    "K33": "../11/9.3-experiments/H23-yolov8n-seg-crackpath.yaml",
+    "K34": "../11/9.3-experiments/H24-yolo11n-seg-baseline.yaml",
+    "K35": "../11/9.3-experiments/H25-yolo11n-seg-crackpath.yaml",
+    "K36": "../11/9.3-experiments/H26-yolo26n-seg-compat-baseline.yaml",
+    "K37": "../11/9.3-experiments/H27-yolo26n-seg-compat-crackpath.yaml",
+    "K38": "../11/9.11-experiments/K38-yolo12n-seg-baseline.yaml",
+    "K39": "../11/9.11-experiments/K39-yolo12n-seg-cpsb.yaml",
+}
+ALL_EXPERIMENTS.update(SEP11_EXPERIMENTS)
+
 # ---- Colours ----
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -1040,9 +1074,63 @@ def test_903_yaml_schema(config_path):
     return True, f"legacy C3k2 compatibility args are explicit (groups={groups}, shortcut={args[4]})"
 
 
+def test_911_structure(model, config_path):
+    """Validate new scan families and the missing placement controls."""
+    if "9.11-experiments" not in str(config_path):
+        return True, "not a 9.11 config"
+    experiment_id = Path(config_path).name.split("-", 1)[0]
+    states = [m for m in model.modules() if m.__class__.__name__ == "SparseCrackPathState"]
+    expected_modes = {
+        "K02": "raster", "K03": "cross", "K04": "serpentine",
+        "K05": "diagonal", "K06": "fixed",
+    }
+    expected_layers = {
+        "K20": [4], "K21": [6], "K23": [2, 4],
+        "K24": [6, 8], "K26": [13, 16, 19, 22],
+    }
+    if experiment_id in expected_modes:
+        actual = {(s.path_mode, s.cue_mode, s.memory_mode, s.route_enabled) for s in states}
+        expected = {(expected_modes[experiment_id], "poc", "full", True)}
+        if len(states) != 4 or actual != expected:
+            return False, f"{experiment_id}: expected four states with {expected}; got {len(states)} and {actual}"
+        budgets = {(s.seed_ratio, s.max_paths, s.path_steps, s.path_ssm.d_state) for s in states}
+        if budgets != {(0.02, 128, 3, 8)}:
+            return False, f"{experiment_id}: unmatched scan budget {budgets}"
+        return True, f"{experiment_id}: four equal-budget {expected_modes[experiment_id]} scan states"
+    if experiment_id in expected_layers:
+        layers = [index for index, module in enumerate(model.model)
+                  if module.__class__.__name__ == "AdaptiveC3k2CrackPath"]
+        if layers != expected_layers[experiment_id] or len(states) != len(layers):
+            return False, f"{experiment_id}: wrapper/state placement={layers}/{len(states)}, expected={expected_layers[experiment_id]}"
+        modes = {(s.path_mode, s.cue_mode, s.memory_mode, s.route_enabled) for s in states}
+        if modes != {("adaptive", "poc", "full", True)}:
+            return False, f"{experiment_id}: placement control changed CPSB internals: {modes}"
+        return True, f"{experiment_id}: CPSB layers={layers}; internals frozen"
+    if experiment_id in {"K28", "K38"}:
+        return (not states, f"{experiment_id}: paired family baseline without CPSB") if not states else (
+            False, f"{experiment_id}: baseline unexpectedly contains {len(states)} CPSB states"
+        )
+    if experiment_id == "K29":
+        wrappers = [m for m in model.modules()
+                    if m.__class__.__name__ == "AdaptiveRepNCSPELAN4CrackPath"]
+        if len(wrappers) != 4 or len(states) != 4:
+            return False, f"K29: expected four RepNCSPELAN4 CPSB shells/states, got {len(wrappers)}/{len(states)}"
+        return True, "K29: four YOLOv9c backbone RepNCSPELAN4-compatible CPSB shells"
+    if experiment_id == "K39":
+        c3_wrappers = [m for m in model.modules() if m.__class__.__name__ == "AdaptiveC3k2CrackPath"]
+        a2_wrappers = [m for m in model.modules() if m.__class__.__name__ == "AdaptiveA2C2fCrackPath"]
+        if len(c3_wrappers) != 2 or len(a2_wrappers) != 2 or len(states) != 4:
+            return False, (
+                "K39: expected two C3k2 plus two A2C2f CPSB shells and four states; "
+                f"got {len(c3_wrappers)}/{len(a2_wrappers)}/{len(states)}"
+            )
+        return True, "K39: YOLO12n backbone uses two C3k2 and two A2C2f CPSB shells"
+    return False, f"unregistered 9.11 experiment structure: {experiment_id}"
+
+
 def test_828_structure_losses(model, config_path):
     """Numerically exercise all enabled 8.28/8.31 auxiliary structure losses."""
-    if not any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments", "9.3-experiments")):
+    if not any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments", "9.3-experiments", "9.11-experiments")):
         return True, "not an 8.28/8.31 config"
     # Keep this check explicit: an updated check_yaml.py combined with an old
     # ultralytics/utils/loss.py previously raised an unhelpful AttributeError.
@@ -1120,7 +1208,7 @@ def test_826_gradient_reachability(model, config_path, output):
     does not reach the loss graph. This specifically guards component-ablation
     YAMLs such as W07, where a disabled role must also remove its scalar gate.
     """
-    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments", "8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments", "9.3-experiments")) or output is None:
+    if not any(tag in str(config_path) for tag in ("8.26-experiments", "8.27-experiments", "8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments", "9.3-experiments", "9.11-experiments")) or output is None:
         return True, "not an 8.26/8.27/8.28/8.31 config"
 
     def tensors(value):
@@ -1151,7 +1239,7 @@ def test_826_gradient_reachability(model, config_path, output):
         scalar, [parameter for _, parameter in named_parameters], retain_graph=True, allow_unused=True
     )
     unused = [name for (name, _), gradient in zip(named_parameters, gradients) if gradient is None]
-    if any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments", "9.3-experiments")):
+    if any(tag in str(config_path) for tag in ("8.28-experiments", "8.31-experiments", "8.31-final", "9.1-experiments", "9.3-experiments", "9.11-experiments")):
         # Sparse path geometry is deliberately detached from the detection graph
         # because top-k/argmax/atan2 define a hard routing policy. Its structure
         # head is connected by the explicit probability/tangent/connectivity
@@ -1227,6 +1315,9 @@ def validate_config(config_path, device, nc=1, imgsz=640, quick=False):
     ok, detail = test_903_structure(model, config_path)
     results.append(("9.3 causal/family structure", ok, detail or ""))
 
+    ok, detail = test_911_structure(model, config_path)
+    results.append(("9.11 scan/placement structure", ok, detail or ""))
+
     # 2. Deepcopy
     ok, detail = test_deepcopy(model, device)
     results.append(("deepcopy (EMA)", ok, detail or ""))
@@ -1293,11 +1384,22 @@ def resolve_experiments(args):
         exp_ids.update(SEP1_EXPERIMENTS.keys())
     if args.sep3:
         exp_ids.update(SEP3_EXPERIMENTS.keys())
+    if args.sep11:
+        # K34/K35 are exact YOLO11 aliases of K00/K01 and need no duplicate check.
+        exp_ids.update(set(SEP11_EXPERIMENTS.keys()) - {"K34", "K35"})
     if args.experiments:
         for e in args.experiments:
             exp_ids.add(e)
     if args.phase:
         phase_map = {
+            "911B": ["K00"],
+            "911CORE": ["K01"],
+            "911S": ["K02", "K03", "K04", "K05", "K06"],
+            "911M": ["K10", "K11", "K12", "K13"],
+            "911P": ["K20", "K21", "K22", "K23", "K24", "K26", "K27"],
+            "911G": ["K28", "K29", "K30", "K31", "K32", "K33", "K38", "K39"],
+            "911GA": ["K34", "K35"],
+            "911G26": ["K36", "K37"],
             "93M": ["H00", "H01"],
             "93A": ["H02"],
             "93SM": ["H03", "H04", "H05"],
@@ -1379,7 +1481,8 @@ def parse_args():
     parser.add_argument("--aug31-final", action="store_true", help="Check all 8.31-final finalist/tuning experiments")
     parser.add_argument("--sep1", action="store_true", help="Check all 9.1 C3k2-replacement experiments")
     parser.add_argument("--sep3", action="store_true", help="Check all 9.3 causal-ablation/family experiments")
-    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 93M/93A/93SM/93C/93W/93F/93F26 (93FA aliases), 91*, or legacy")
+    parser.add_argument("--sep11", action="store_true", help="Check the complete 9.11 three-part CPSB experiment programme")
+    parser.add_argument("--phase", nargs="+", default=None, help="Phase: 911B/911CORE/911S/911M/911P/911G/911G26, 93*, or legacy")
     parser.add_argument("--experiments", nargs="+", default=None, help="Experiment IDs: B0 S1 C2 ...")
     parser.add_argument("--exclude", nargs="+", default=None, help="IDs to exclude")
     parser.add_argument("--list", action="store_true", help="List available experiments")
