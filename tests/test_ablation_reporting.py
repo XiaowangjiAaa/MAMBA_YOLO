@@ -9,9 +9,45 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from summarize_ablation_results import collect, parse_report, tables
 from visualize_ablation_paper import scatter_path, memory_diagnostics, figure_grid, structure_figures, resolve_specs, resolve_splits, write_rows
+from visualize_ablation_paper import select_stage_layers, comparison_groups
 
 
 class ReportingTests(unittest.TestCase):
+    def test_auto_stages_real_yaml_topologies(self):
+        import yaml
+        repo = Path(__file__).resolve().parents[1]
+        cases = [
+            ('11/9.3-experiments/H20-yolov5n-seg-baseline.yaml', [17,20,23]),
+            ('11/9.3-experiments/H22-yolov8n-seg-baseline.yaml', [15,18,21]),
+            ('11/9.11-experiments/K28-yolov9c-seg-baseline.yaml', [15,18,21]),
+            ('11/9.3-experiments/H01-g01-full.yaml', [16,19,22]),
+            ('11/9.11-experiments/K38-yolo12n-seg-baseline.yaml', [14,17,20]),
+            ('11/9.11-experiments/K26-neck-only.yaml', [16,19,22])]
+        for path, neck in cases:
+            cfg = yaml.safe_load((repo/'ultralytics/cfg/models'/path).read_text(encoding='utf-8'))
+            layers = cfg['backbone']+cfg['head']
+            model = [type(str(row[2]), (), {'f':row[0]})() for row in layers]
+            core = SimpleNamespace(yaml=cfg, model=model)
+            # Synthetic observed stride metadata isolates selection from model inference.
+            shapes = {0:2,1:4,2:4,3:8,4:8,5:16,6:16,7:32,8:32}
+            for i in range(9,len(cfg['backbone'])):
+                shapes[i] = 32
+            shapes.update(dict(zip(neck,[8,16,32])))
+            plan = select_stage_layers(core,shapes)
+            self.assertEqual([plan['backbone_P'+str(p)] for p in (2,3,4,5)], ['model.2','model.4','model.6','model.8'])
+            self.assertEqual([plan['neck_P'+str(p)] for p in (3,4,5)], ['model.'+str(i) for i in neck])
+
+    def test_groups_do_not_mix_families(self):
+        specs = [{'label':n} for n in ['K01_crack-seg_seed1','K06_crack-seg_seed1','K10_crack-seg_seed1',
+                                      'K26_crack-seg_seed1','K28_crack-seg_seed1','K29_crack-seg_seed1',
+                                      'K30_crack-seg_seed1','K31_crack-seg_seed1']]
+        groups = {name:(subset,prefix) for name,subset,prefix in comparison_groups(specs)}
+        self.assertEqual(groups['scanning'][1], 'backbone_')
+        self.assertEqual(groups['memory'][1], 'backbone_')
+        self.assertEqual(groups['placement'][1], 'neck_')
+        self.assertEqual([s['label'][:3] for s in groups['family_v9'][0]], ['K28','K29'])
+        self.assertEqual([s['label'][:3] for s in groups['family_v5'][0]], ['K30','K31'])
+
     def test_all_runs_includes_all_seeds_and_skips_missing_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

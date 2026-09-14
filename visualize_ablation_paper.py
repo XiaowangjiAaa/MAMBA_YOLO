@@ -11,6 +11,7 @@ import gc
 import hashlib
 import json
 import random
+import re
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +26,8 @@ def parse_args():
     p.add_argument('--manifest', type=Path, help='JSON list of {label,weights,yaml(optional),layers(optional)}; overrides runs')
     p.add_argument('--source', required=True, help='Image / directory / TXT / dataset YAML')
     p.add_argument('--split', choices=['train', 'val', 'test', 'all'], default='val', help='all = every declared train/val/test split in --source YAML')
-    p.add_argument('--layers', default='4,6', help='Comma-separated YAML layer indices or named modules')
+    p.add_argument('--layers', '--feature-layers', dest='layers', default='auto', help='auto = discover backbone/neck stages; or comma-separated layer indices/names')
+    p.add_argument('--mechanism-layers', default='auto', help='auto = all actual CPSB states; none = disabled; or parent layer indices/names')
     p.add_argument('--max-images', type=int, default=6, help='0 = all images; random selection independent of predictions')
     p.add_argument('--sample-seed', type=int, default=1)
     p.add_argument('--imgsz', type=int, default=640)
@@ -122,7 +124,90 @@ def resolve_specs(args):
                 s[key] = str(path)
                 s[key + '_sha256'] = fingerprint(path)
         s['layers'] = s.get('layers', args.layers)
+        s['mechanism_layers'] = s.get('mechanism_layers', getattr(args, 'mechanism_layers', 'auto'))
     return specs
+
+
+def select_stage_layers(core, shapes):
+    """Use actual spatial strides and head inputs, not family-specific indices."""
+    backbone_count = len(core.yaml.get('backbone', []))
+    if not backbone_count:
+        raise ValueError('Auto layers require checkpoint model.yaml.backbone; use --layers explicitly')
+    selected = {}
+    stage_types = ('C3', 'C2f', 'C2F', 'C3k2', 'A2C2f', 'RepNCSPELAN4', 'VSS', 'CrackPath', 'CASP')
+    for stage, stride in [('P2',4), ('P3',8), ('P4',16), ('P5',32)]:
+        candidates = [i for i in range(backbone_count) if shapes.get(i) == stride]
+        blocks = [i for i in candidates if any(t in type(core.model[i]).__name__ for t in stage_types)]
+        if candidates:
+            selected['backbone_'+stage] = 'model.'+str((blocks or candidates)[-1])
+    head = core.model[-1]
+    sources = head.f if isinstance(head.f, (list, tuple)) else [head.f]
+    for source in sources:
+        index = source if source >= 0 else len(core.model)-1+source
+        stride = shapes.get(index)
+        if stride in (8,16,32):
+            key = 'neck_P'+str({8:3,16:4,32:5}[stride])
+            if key in selected:
+                raise ValueError(f'Ambiguous head input for {key}; select layers manually')
+            selected[key] = 'model.'+str(index)
+    if not selected:
+        raise ValueError('Could not resolve spatial stages; select layers manually')
+    return selected
+
+
+def discover_layers(core, spec, imgsz, device):
+    import torch
+    from compare_model_features import resolve_layer_names
+    modules = dict(core.named_modules())
+    if spec['layers'].lower() == 'auto':
+        shapes, handles = {}, []
+        for i, module in enumerate(core.model):
+            def hook(m, inputs, output, i=i):
+                if torch.is_tensor(output) and output.ndim == 4:
+                    h,w = output.shape[-2:]
+                    if h and w and imgsz % h == 0 and imgsz % w == 0 and imgsz//h == imgsz//w:
+                        shapes[i] = imgsz//h
+            handles.append(module.register_forward_hook(hook))
+        try:
+            with torch.inference_mode():
+                core(torch.zeros(1,3,imgsz,imgsz,device=device))
+        finally:
+            for handle in handles:
+                handle.remove()
+        features = select_stage_layers(core, shapes)
+    else:
+        features = {f'manual_{i}': n for i,n in enumerate(resolve_layer_names(core, spec['layers']))}
+    policy = spec['mechanism_layers'].lower()
+    parents = None if policy in ('auto','none') else resolve_layer_names(core, spec['mechanism_layers'])
+    states = {n:m for n,m in modules.items() if hasattr(m,'path_ssm') and hasattr(m,'last_path_indices')
+              and policy != 'none' and (parents is None or any(n == p or n.startswith(p+'.') for p in parents))}
+    if parents and not states:
+        raise ValueError('Selected mechanism layers contain no CPSB path state')
+    plan = {'features': features, 'mechanisms': list(states),
+            'mechanism_status': 'found' if states else ('disabled' if policy=='none' else 'no CPSB in model'),
+            'selection': 'Observed spatial strides + checkpoint backbone boundary + segmentation head inputs'}
+    return plan, states
+
+
+def comparison_groups(specs):
+    """K01 is shared by the three ablations; compare family pairs separately."""
+    definitions = {
+        'scanning': ({'K01','K02','K03','K04','K05','K06'}, 'backbone_'),
+        'memory': ({'K01','K10','K11','K12','K13'}, 'backbone_'),
+        'placement': ({'K00','K01','K20','K21','K22','K23','K24','K26','K27'}, 'neck_'),
+        'family_v5': ({'K30','K31'}, 'neck_'), 'family_v8': ({'K32','K33'}, 'neck_'),
+        'family_v9': ({'K28','K29'}, 'neck_'), 'family_v11': ({'K00','K01','K34','K35'}, 'neck_'),
+        'family_v12': ({'K38','K39'}, 'neck_'), 'family_v26_compat': ({'K36','K37'}, 'neck_')}
+    groups, used = [], set()
+    for name,(ids,prefix) in definitions.items():
+        subset = [s for s in specs if re.split(r'[_-]',s['label'])[0] in ids]
+        if len(subset) >= 2:
+            groups.append((name, subset, prefix))
+            used.update(s['label'] for s in subset)
+    remaining = [s for s in specs if s['label'] not in used]
+    if remaining:
+        groups.append(('other', remaining, ''))
+    return groups
 
 
 def resolve_splits(source, requested):
@@ -293,8 +378,6 @@ def run_split(args, specs, split):
     from compare_model_features import (preprocess, letterbox_mask, resolve_layer_names, capture_hook,
                                         reduce_feature, robust_normalize, heat_overlay, focus_statistics)
     device = torch.device('cpu' if args.device == 'cpu' else ('cuda:' + args.device if args.device.isdigit() else args.device))
-    if len({len(s['layers'].split(',')) for s in specs}) != 1:
-        raise ValueError('Use the same number of corresponding layers for all models')
     images, root, _ = resolve_source(Path(args.source).resolve(), split, True)
     images = sorted(set(images))
     if args.max_images and len(images) > args.max_images:
@@ -317,10 +400,12 @@ def run_split(args, specs, split):
         (model_out / 'manifest.json').write_text(json.dumps({**manifest, 'models': [spec]}, indent=2), encoding='utf-8')
         print(f"Loading {spec['label']}: {spec['weights']}", flush=True)
         core = load_core(spec, device)
-        layers = resolve_layer_names(core, spec['layers'])
+        plan, states = discover_layers(core, spec, args.imgsz, device)
+        spec['resolved_plan'] = plan
+        (model_out / 'layer_plan.json').write_text(json.dumps(plan, indent=2), encoding='utf-8')
+        print(f"  Features: {plan['features']}; mechanisms: {plan['mechanisms'] or plan['mechanism_status']}", flush=True)
+        layers = list(dict.fromkeys(plan['features'].values()))
         modules = dict(core.named_modules())
-        states = {n: m for n, m in modules.items() if hasattr(m, 'path_ssm') and hasattr(m, 'last_path_indices')
-                  and any(n == l or n.startswith(l+'.') for l in layers)}
         for image_index, image_path in enumerate(images):
             prefix = f'{image_index:04d}_{image_path.stem}'
             folder = model_out / prefix
@@ -373,15 +458,15 @@ def run_split(args, specs, split):
             metrics.append({'model': spec['label'], 'split': split, 'image': str(image_path), 'gt_available': known_gt,
                             'gt_label': str(gt.label_path) if known_gt else '',
                             **(union_metrics(pm, gt.masks) if known_gt else {})})
-            for j, name in enumerate(layers):
+            for role, name in plan['features'].items():
                 if name not in features:
                     raise ValueError(f'Layer does not output a spatial tensor: {name}')
                 heat = reduce_feature(features[name], 'l2')
-                np.save(folder / f"{spec['label']}_feature{j}.npy", heat)
+                np.save(folder / f"{spec['label']}_{role}.npy", heat)
                 norm = robust_normalize(heat, 99.)
                 overlay = heat_overlay(canvas, norm, .45)[top:top+rh, left:left+rw]
-                write_image(folder / f"{spec['label']}_feature{j}.png", cv2.resize(overlay, (w,h)))
-                focus.append({'model': spec['label'], 'split': split, 'image': str(image_path), 'layer': name,
+                write_image(folder / f"{spec['label']}_{role}.png", cv2.resize(overlay, (w,h)))
+                focus.append({'model': spec['label'], 'split': split, 'image': str(image_path), 'layer': name, 'role': role,
                               **focus_statistics(heat, gt_square, valid_pixels)})
             for name, state in states.items():
                 if name in memory:
@@ -398,30 +483,44 @@ def run_split(args, specs, split):
             write_rows(model_out / (name+'.csv'), [r for r in rows if r['model'] == spec['label']])
     for name, rows in [('per_image_metrics', metrics), ('feature_focus', focus), ('routing_memory', routing)]:
         write_rows(out / (name+'.csv'), rows)
-    paired_plot(metrics, specs, out)
-    for i, image in enumerate(images):
-        prefix = f'{i:04d}_{image.stem}'
-        comparison_folder = out / prefix
-        comparison_folder.mkdir(exist_ok=True)
-        rows = []
-        for s in specs:
-            label = s['label']
-            folder = args.output_dir.resolve() / label / split / prefix
-            has_gt = next(r['gt_available'] for r in metrics if r['model']==label and r['image']==str(image))
-            row = [('Input', read_image(folder/'input.png')), ('GT' if has_gt else 'GT unavailable', read_image(folder/'gt.png')),
-                   (label+' prediction', read_image(folder/(label+'_prediction.png'))),
-                   ('TP green / FP red / FN blue' if has_gt else 'Error map unavailable (no GT)', read_image(folder/(label+'_error.png')))]
-            row.extend((label+' '+l+' RMS (relative)', read_image(folder/f'{label}_feature{j}.png')) for j,l in enumerate(s['layers'].split(',')))
-            rows.append(row)
-        if len({len(r) for r in rows}) != 1:
-            raise ValueError('Use the same number of corresponding layers for all models')
-        # Avoid enormous 23-model panels with all; preserve order, six models per page.
-        for start in range(0, len(rows), 6):
-            page = rows[start:start+6]
-            suffix = f'_{start//6+1:02d}' if len(rows) > 6 else ''
-            figure_grid(page, list(range(len(page[0]))), comparison_folder/('comparison'+suffix))
-            if roi:
-                figure_grid(page, list(range(len(page[0]))), comparison_folder/('comparison_roi'+suffix), roi)
+    groups = comparison_groups(specs)
+    (out/'layer_plans.json').write_text(json.dumps({s['label']:s['resolved_plan'] for s in specs}, indent=2), encoding='utf-8')
+    for group, subset, role_prefix in groups:
+        group_out = out/group
+        group_out.mkdir(exist_ok=True)
+        group_metrics = [r for r in metrics if r['model'] in {s['label'] for s in subset}]
+        write_rows(group_out/'per_image_metrics.csv', group_metrics)
+        paired_plot(group_metrics, subset, group_out)
+        roles = list(dict.fromkeys(k for s in subset for k in s['resolved_plan']['features']
+                                   if k.startswith(role_prefix) or k.startswith('manual_')))
+        if not roles:
+            raise ValueError(f'No requested semantic feature roles found for group {group}; use --layers manually')
+        (group_out/'comparison_plan.json').write_text(json.dumps({'models':[s['label'] for s in subset],
+                                                                'roles':roles, 'reference':subset[0]['label']},indent=2), encoding='utf-8')
+        for i, image in enumerate(images):
+            prefix = f'{i:04d}_{image.stem}'
+            comparison_folder = group_out/prefix
+            comparison_folder.mkdir(exist_ok=True)
+            rows = []
+            for s in subset:
+                label = s['label']
+                folder = args.output_dir.resolve()/label/split/prefix
+                has_gt = next(r['gt_available'] for r in group_metrics if r['model']==label and r['image']==str(image))
+                original = read_image(folder/'input.png')
+                row = [('Input',original), ('GT' if has_gt else 'GT unavailable',read_image(folder/'gt.png')),
+                       (label+' prediction',read_image(folder/(label+'_prediction.png'))),
+                       ('TP green / FP red / FN blue' if has_gt else 'No GT: error unavailable',read_image(folder/(label+'_error.png')))]
+                for role in roles:
+                    name = s['resolved_plan']['features'].get(role)
+                    row.append((role+' '+name+' RMS' if name else role+' unavailable',
+                                read_image(folder/f'{label}_{role}.png') if name else np.full_like(original,235)))
+                rows.append(row)
+            for start in range(0,len(rows),6):
+                page = rows[start:start+6]
+                suffix = f'_{start//6+1:02d}' if len(rows)>6 else ''
+                figure_grid(page,list(range(len(page[0]))),comparison_folder/('comparison'+suffix))
+                if roi:
+                    figure_grid(page,list(range(len(page[0]))),comparison_folder/('comparison_roi'+suffix),roi)
     print(f'Done: {out}')
 
 
