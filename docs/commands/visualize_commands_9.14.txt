@@ -1,0 +1,35 @@
+# Run from repository root in the working training environment. Default seed=1.
+# A source can be image, directory, TXT or dataset YAML. Use the correct local YAML.
+# Each visualization command needs a NEW/EMPTY output directory.
+
+# ALL runs (including every seed with best_map50.pt) x ALL declared dataset splits x ALL images.
+# Potentially very large: first use --max-images 1 to verify, then --max-images 0.
+python visualize_ablation_paper.py --runs-dir output_dir/crack-seg-9.11 --experiments all --source crack-seg/data.yaml --split all --layers 4,6 --max-images 0 --device 0 --output-dir paper_visualizations/9.11-all
+
+# Refresh all four ablation tables + curves/figures (no checkpoint loading).
+python summarize_ablation_results.py --runs-dir output_dir/crack-seg-9.11 --seed 1 --plots
+
+# Smoke test: one common validation image, backbone P3/P4.
+python visualize_ablation_paper.py --experiments K01 K06 --source crack-seg/data.yaml --split val --layers 4,6 --max-images 1 --device 0 --output-dir paper_visualizations/9.11-smoke
+
+# Scan comparisons (same random sample; no selection by performance).
+python visualize_ablation_paper.py --experiments K01 K02 K03 K04 K05 K06 --source crack-seg/data.yaml --split val --layers 4,6 --max-images 6 --sample-seed 1 --device 0 --output-dir paper_visualizations/9.11-scanning
+
+# Memory: K10 still contains CPSB; it is NOT the native YOLO baseline.
+python visualize_ablation_paper.py --experiments K10 K11 K12 K13 K01 --source crack-seg/data.yaml --split val --layers 4,6 --max-images 6 --device 0 --output-dir paper_visualizations/9.11-memory
+
+# Placement: compare final P3/P4 fusion outputs, including neck-only state maps.
+python visualize_ablation_paper.py --experiments K01 K23 K26 K27 --source crack-seg/data.yaml --split val --layers 16,19 --max-images 6 --device 0 --output-dir paper_visualizations/9.11-placement
+
+# Paired with/without CPSB on v9c; do NOT compare its absolute AP to n-size families.
+python visualize_ablation_paper.py --experiments K28 K29 --source crack-seg/data.yaml --split val --layers 4,6 --max-images 6 --roi 0.2,0.2,0.8,0.8 --device 0 --output-dir paper_visualizations/9.11-v9c
+
+# Include negative transfer evidence.
+python visualize_ablation_paper.py --experiments K30 K31 --source crack-seg/data.yaml --split val --layers 4,6 --max-images 6 --device 0 --output-dir paper_visualizations/9.11-v5n
+python visualize_ablation_paper.py --experiments K32 K33 --source crack-seg/data.yaml --split val --layers 4,6 --max-images 6 --device 0 --output-dir paper_visualizations/9.11-v8n
+
+# Full-val paired pixel distributions, more disk/time due to per-image PDF/NPZ exports.
+python visualize_ablation_paper.py --experiments K10 K01 --source crack-seg/data.yaml --split val --layers 4,6 --max-images 0 --device 0 --output-dir paper_visualizations/9.11-memory-full-val
+
+# Helper regression tests (does not run training).
+python tests/test_ablation_reporting.py

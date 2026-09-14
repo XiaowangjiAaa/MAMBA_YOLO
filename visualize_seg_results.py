@@ -10,7 +10,10 @@ Examples:
   python visualize_seg_results.py --weights best_map50.pt --source image.jpg
   python visualize_seg_results.py --weights best_map50.pt --source images/ --recursive
   python visualize_seg_results.py --model-yaml model.yaml --weights best_map50.pt \
-      --source crack-seg/data.yaml --split val --device 0
+      --source crack-seg/data.yaml --output-dir predictresults/crack-seg/model --device 0
+
+When ``--source`` is a dataset YAML, every available train/val/test split is
+processed automatically and written to a matching output subdirectory.
 
 The per-image AP values in ``per_image_metrics.csv`` are diagnostic image-level
 AP values. The dataset-level AP values in ``summary_metrics.csv`` aggregate all
@@ -69,9 +72,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source",
         required=True,
-        help="Image, image directory, image-list TXT, or dataset YAML (data.yaml/crack-seg.yaml)",
+        help=(
+            "Image, image directory, image-list TXT, or dataset YAML; YAML input "
+            "automatically processes every available train/val/test split"
+        ),
     )
-    parser.add_argument("--split", choices=("train", "val", "test"), default="val")
     parser.add_argument("--output-dir", default="visualization_results", help="Output directory")
     parser.add_argument("--device", default="0", help="CUDA device such as 0, 0,1, cpu")
     parser.add_argument("--imgsz", type=int, default=640)
@@ -800,38 +805,34 @@ def write_csv(path: Path, rows: Sequence[dict], fieldnames: Sequence[str]) -> No
             writer.writerow({key: finite_or_blank(row.get(key, "")) for key in fieldnames})
 
 
-def main() -> int:
-    args = parse_args()
-    previous_cuda_visible = prepare_device_environment(args.device)
-    if cv2 is None:
-        raise ModuleNotFoundError(
-            "OpenCV is required. Activate the project environment or install opencv-python>=4.6.0."
-        )
-    if not 0.0 <= args.conf <= 1.0 or not 0.0 <= args.visual_conf <= 1.0:
-        raise ValueError("--conf and --visual-conf must be within [0, 1]")
-    if args.conf > args.visual_conf:
-        print(
-            "Warning: --conf is greater than --visual-conf; detections below --conf cannot be visualized.",
-            file=sys.stderr,
-        )
-    source = Path(args.source).expanduser()
-    weights = Path(args.weights).expanduser()
-    model_yaml = Path(args.model_yaml).expanduser() if args.model_yaml else None
-    output_dir = Path(args.output_dir).expanduser().resolve()
+def process_source(
+    args: argparse.Namespace,
+    source: Path,
+    weights: Path,
+    model_yaml: Optional[Path],
+    model,
+    load_description: str,
+    previous_cuda_visible: Optional[str],
+    split: Optional[str],
+    output_dir: Path,
+) -> None:
+    """Process one dataset split, or one ordinary image source."""
+    source = source.expanduser()
     image_dir = output_dir / "images"
     output_dir.mkdir(parents=True, exist_ok=True)
     if not args.no_images:
         image_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_mode = is_dataset_yaml(source)
-    images, dataset_root, dataset_config = resolve_source(source, args.split, args.recursive)
+    resolved_split = split or "val"  # Ignored for an ordinary image source.
+    images, dataset_root, dataset_config = resolve_source(source, resolved_split, args.recursive)
     if args.max_images > 0:
         images = images[: args.max_images]
     if not images:
         raise FileNotFoundError(f"no supported images resolved from: {source}")
 
     print(f"Source:  {source.resolve()}")
-    print(f"Mode:    {'dataset YAML / ' + args.split if dataset_mode else 'image source'}")
+    print(f"Mode:    {'dataset YAML / ' + resolved_split if dataset_mode else 'image source'}")
     print(f"Images:  {len(images)}")
     print(f"Output:  {output_dir}")
     if str(args.device).lower() != "cpu":
@@ -840,7 +841,6 @@ def main() -> int:
             f"visible={os.environ.get('CUDA_VISIBLE_DEVICES', '<unchanged>')} "
             f"(previous={previous_cuda_visible or '<unset>'})"
         )
-    model, load_description = load_model(weights, model_yaml)
     print(f"Model:   {load_description}")
 
     # Passing thousands of paths as a Python list makes Ultralytics' autocast_list
@@ -978,7 +978,7 @@ def main() -> int:
         "weights": str(weights.resolve()),
         "model_yaml": str(model_yaml.resolve()) if model_yaml else "",
         "source": str(source.resolve()),
-        "split": args.split if dataset_mode else "",
+        "split": resolved_split if dataset_mode else "",
         "metric_implementation": "custom class-aware mask AP; use official model.val for paper headline metrics",
         "ap_conf_floor": args.conf,
         "visual_and_pixel_conf": args.visual_conf,
@@ -1030,6 +1030,64 @@ def main() -> int:
         print(f"Mask mAP50:    {summary['dataset_mask_map50']:.4f}")
         print(f"Mask mAP50-95: {summary['dataset_mask_map50_95']:.4f}")
         print(f"Macro clDice:  {summary['macro_cldice']:.4f}")
+    print()
+
+
+def available_dataset_splits(dataset_yaml: Path) -> List[str]:
+    """Return non-empty dataset splits in the conventional output order."""
+    with dataset_yaml.resolve().open("r", encoding="utf-8") as stream:
+        data = yaml.safe_load(stream) or {}
+    return [name for name in ("train", "val", "test") if data.get(name) not in (None, "", [])]
+
+
+def main() -> int:
+    args = parse_args()
+    previous_cuda_visible = prepare_device_environment(args.device)
+    if cv2 is None:
+        raise ModuleNotFoundError(
+            "OpenCV is required. Activate the project environment or install opencv-python>=4.6.0."
+        )
+    if not 0.0 <= args.conf <= 1.0 or not 0.0 <= args.visual_conf <= 1.0:
+        raise ValueError("--conf and --visual-conf must be within [0, 1]")
+    if args.conf > args.visual_conf:
+        print(
+            "Warning: --conf is greater than --visual-conf; detections below --conf cannot be visualized.",
+            file=sys.stderr,
+        )
+
+    source = Path(args.source).expanduser()
+    weights = Path(args.weights).expanduser()
+    model_yaml = Path(args.model_yaml).expanduser() if args.model_yaml else None
+    base_output_dir = Path(args.output_dir).expanduser().resolve()
+    dataset_mode = is_dataset_yaml(source)
+
+    if dataset_mode:
+        splits = available_dataset_splits(source)
+        if not splits:
+            raise ValueError(f"dataset YAML has no usable train/val/test entry: {source}")
+        print(f"Dataset splits: {', '.join(splits)}")
+    else:
+        splits = [None]
+
+    # Load the network once, then reuse it for train/val/test.
+    model, load_description = load_model(weights, model_yaml)
+    for split in splits:
+        split_output_dir = base_output_dir / split if split else base_output_dir
+        if split:
+            print(f"\n{'=' * 20} {split.upper()} {'=' * 20}")
+        process_source(
+            args=args,
+            source=source,
+            weights=weights,
+            model_yaml=model_yaml,
+            model=model,
+            load_description=load_description,
+            previous_cuda_visible=previous_cuda_visible,
+            split=split,
+            output_dir=split_output_dir,
+        )
+
+    print(f"All results saved under: {base_output_dir}")
     return 0
 
 
