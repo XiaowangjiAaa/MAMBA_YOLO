@@ -27,7 +27,6 @@ def parse_args():
     p.add_argument('--source', required=True, help='Image / directory / TXT / dataset YAML')
     p.add_argument('--split', choices=['train', 'val', 'test', 'external', 'all'], default='val', help='all = YAML train/val/test; external = label a direct image folder as an external set')
     p.add_argument('--gt-dir', type=Path, help='Optional directory of raster GT masks matched to images by filename stem')
-    p.add_argument('--gt-rotate', choices=['none', 'left', 'right', '180'], default='none', help='Rotate raster GT before comparison; left = 90 degrees counter-clockwise')
     p.add_argument('--gt-invert', action='store_true', help='Treat zero pixels as foreground in raster GT masks')
     p.add_argument('--layers', '--feature-layers', dest='layers', default='auto', help='auto = discover backbone/neck stages; or comma-separated layer indices/names')
     p.add_argument('--mechanism-layers', default='auto', help='auto = every actual CPSB state (independent of feature layers); none = disabled; or parent layer indices/names')
@@ -286,13 +285,8 @@ def build_gt_index(gt_dir):
     return index
 
 
-def rotate_gt_mask(mask, rotation):
-    turns = {'none':0, 'left':1, '180':2, 'right':3}[rotation]
-    return np.rot90(mask, turns).copy() if turns else mask.copy()
-
-
-def load_external_gt(image_path, gt_index, image_shape, rotation='none', invert=False):
-    """Load a binary raster GT mask without resizing it into apparent alignment."""
+def load_external_gt(image_path, gt_index, image_shape, invert=False):
+    """Load an already aligned binary raster GT mask without rotating or resizing it."""
     from PIL import Image
     path = gt_index.get(image_path.stem.casefold())
     if path is None:
@@ -302,21 +296,12 @@ def load_external_gt(image_path, gt_index, image_shape, rotation='none', invert=
     if raw.ndim == 3:
         raw = raw[..., :3].max(axis=2)
     mask = raw == 0 if invert else raw != 0
-    mask = rotate_gt_mask(mask, rotation)
     if mask.shape != tuple(image_shape):
         raise ValueError(
-            f'GT/image shape mismatch after rotation={rotation}: {path} is {mask.shape}, '
-            f'{image_path} is {tuple(image_shape)}. Refusing to resize GT.'
+            f'GT/image shape mismatch: {path} is {mask.shape}, {image_path} is {tuple(image_shape)}. '
+            'Images and GT must already be spatially aligned; refusing to rotate or resize GT.'
         )
     return mask.astype(bool), path
-
-
-def read_exif_upright_image(path):
-    """Return EXIF-normalized BGR so rotated raster GT is checked against displayed pixels."""
-    from PIL import Image, ImageOps
-    with Image.open(path) as source:
-        rgb = np.asarray(ImageOps.exif_transpose(source).convert('RGB'))
-    return np.ascontiguousarray(rgb[..., ::-1])
 
 
 def write_rows(path, rows):
@@ -674,11 +659,11 @@ def run_split(args, specs, split):
             prefix = f'{image_index:04d}_{image_path.stem}'
             folder = model_out / prefix
             folder.mkdir(exist_ok=True)
-            image = read_exif_upright_image(image_path) if gt_index is not None else read_image(image_path)
+            image = read_image(image_path)
             h, w = image.shape[:2]
             canvas, tensor, valid_pixels, meta = preprocess(image, args.imgsz, device, torch)
             if gt_index is not None:
-                gt_union, gt_path = load_external_gt(image_path, gt_index, (h, w), args.gt_rotate, args.gt_invert)
+                gt_union, gt_path = load_external_gt(image_path, gt_index, (h, w), args.gt_invert)
                 masks = gt_union[None] if gt_union.any() else np.zeros((0, h, w), dtype=bool)
                 gt = GroundTruth(masks, np.zeros(len(masks), dtype=np.int64), gt_path)
                 known_gt = True
@@ -731,7 +716,7 @@ def run_split(args, specs, split):
             metrics.append({'model': spec['label'], 'split': split, 'image': str(image_path), 'gt_available': known_gt,
                             'gt_label': str(gt.label_path) if known_gt else '',
                             'gt_format': 'raster_mask' if gt_index is not None else 'yolo_polygon',
-                            'gt_rotation': args.gt_rotate if gt_index is not None else 'none',
+                            'gt_alignment': 'direct_no_rotation' if gt_index is not None else 'yolo_polygon',
                             **(union_metrics(pm, gt.masks) if known_gt else {})})
             for role, name in plan['features'].items():
                 if name not in features:

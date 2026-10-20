@@ -3,19 +3,19 @@
 # Each visualization command needs a NEW/EMPTY output directory.
 
 # SUT-Crack scanning ablation: paper's four principal columns, all 130 external images.
-# Raster=K02, Cross=K03, Diagonal=K05, Adaptive=K01. Raster masks are rotated left 90 degrees.
-python visualize_ablation_paper.py --runs-dir output_dir/crack-seg-9.11 --experiments K02 K03 K05 K01 --source "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\JPEGImages" --gt-dir "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\cnnlabels" --gt-rotate left --split external --max-images 0 --device 0 --output-dir paper_visualizations/SUT-Crack-scanning-four
+# Raster=K02, Cross=K03, Diagonal=K05, Adaptive=K01. Images and raster masks must already be aligned.
+python visualize_ablation_paper.py --runs-dir output_dir/crack-seg-9.11 --experiments K02 K03 K05 K01 --source "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\JPEGImages" --gt-dir "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\cnnlabels" --split external --max-images 0 --device 0 --output-dir paper_visualizations/SUT-Crack-scanning-four
 
 # Paper-style effect figure like the supplied reference: 3 prediction-independent sampled cases.
 # Produces Input | GT | Raster | Cross | Diagonal | Adaptive, identical ROI zooms, TP/FN/FP colours and per-image IoU/clDice.
 # --qualitative-only avoids feature/path exports and is much faster for this purpose.
-python visualize_ablation_paper.py --runs-dir output_dir/crack-seg-9.11 --experiments K02 K03 K05 K01 --source "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\JPEGImages" --gt-dir "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\cnnlabels" --gt-rotate left --split external --max-images 3 --sample-seed 1 --qualitative-scanning --qualitative-only --qualitative-roi-size 0.28 --device 0 --output-dir paper_visualizations/SUT-Crack-scanning-effect-auto
+python visualize_ablation_paper.py --runs-dir output_dir/crack-seg-9.11 --experiments K02 K03 K05 K01 --source "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\JPEGImages" --gt-dir "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\cnnlabels" --split external --max-images 3 --sample-seed 1 --qualitative-scanning --qualitative-only --qualitative-roi-size 0.28 --device 0 --output-dir paper_visualizations/SUT-Crack-scanning-effect-auto
 
 # Publication version with manually frozen image/ROI choices (edit the example JSON first).
-python visualize_ablation_paper.py --runs-dir output_dir/crack-seg-9.11 --experiments K02 K03 K05 K01 --source "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\JPEGImages" --gt-dir "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\cnnlabels" --gt-rotate left --split external --qualitative-scanning --qualitative-only --qualitative-cases docs/commands/scanning_qualitative_cases.example.json --device 0 --output-dir paper_visualizations/SUT-Crack-scanning-effect-paper
+python visualize_ablation_paper.py --runs-dir output_dir/crack-seg-9.11 --experiments K02 K03 K05 K01 --source "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\JPEGImages" --gt-dir "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\cnnlabels" --split external --qualitative-scanning --qualitative-only --qualitative-cases docs/commands/scanning_qualitative_cases.example.json --device 0 --output-dir paper_visualizations/SUT-Crack-scanning-effect-paper
 
 # SUT-Crack scanning ablation: all six available scanning strategies.
-python visualize_ablation_paper.py --runs-dir output_dir/crack-seg-9.11 --experiments K02 K03 K04 K05 K06 K01 --source "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\JPEGImages" --gt-dir "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\cnnlabels" --gt-rotate left --split external --max-images 0 --device 0 --output-dir paper_visualizations/SUT-Crack-scanning-all
+python visualize_ablation_paper.py --runs-dir output_dir/crack-seg-9.11 --experiments K02 K03 K04 K05 K06 K01 --source "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\JPEGImages" --gt-dir "F:\dataset\Public_crack_dataset\SUT-Crack\VOC2012\cnnlabels" --split external --max-images 0 --device 0 --output-dir paper_visualizations/SUT-Crack-scanning-all
 
 # ALL runs (including every seed with best_map50.pt) x ALL declared dataset splits x ALL images.
 # Potentially very large: first use --max-images 1 to verify, then --max-images 0.

@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from summarize_ablation_results import collect, parse_report, tables
 from visualize_ablation_paper import scatter_path, memory_diagnostics, figure_grid, structure_figures, resolve_specs, resolve_splits, write_rows
-from visualize_ablation_paper import build_gt_index, rotate_gt_mask, load_external_gt
+from visualize_ablation_paper import build_gt_index, load_external_gt
 from visualize_ablation_paper import select_stage_layers, comparison_groups
 from visualize_ablation_paper import automatic_gt_roi, mask_error_image, resolve_qualitative_cases, scan_display_name
 
@@ -40,21 +40,20 @@ class ReportingTests(unittest.TestCase):
             np.testing.assert_array_equal(error[1,1], [237,116,176])
             self.assertEqual(scan_display_name('K01_crack-seg_seed1'), 'Adaptive')
 
-    def test_external_gt_index_and_left_rotation(self):
+    def test_external_gt_index_and_direct_alignment(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root/'1.png').write_bytes(b'placeholder')
             index = build_gt_index(root)
             self.assertEqual(index['1'].name, '1.png')
             portrait = np.arange(12).reshape(4,3)
-            left = rotate_gt_mask(portrait, 'left')
-            self.assertEqual(left.shape, (3,4))
-            np.testing.assert_array_equal(left, np.rot90(portrait,1))
             from PIL import Image
             Image.fromarray((portrait > 5).astype(np.uint8)*255).save(root/'mask.png')
-            mask, path = load_external_gt(Path('mask.jpg'), {'mask':root/'mask.png'}, (3,4), 'left')
-            self.assertEqual(mask.shape, (3,4))
+            mask, path = load_external_gt(Path('mask.jpg'), {'mask':root/'mask.png'}, (4,3))
+            self.assertEqual(mask.shape, (4,3))
             self.assertEqual(path.name, 'mask.png')
+            with self.assertRaises(ValueError):
+                load_external_gt(Path('mask.jpg'), {'mask':root/'mask.png'}, (3,4))
             (root/'nested').mkdir()
             (root/'nested'/'1.jpg').write_bytes(b'duplicate')
             with self.assertRaises(ValueError):
