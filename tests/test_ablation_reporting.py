@@ -11,9 +11,35 @@ from summarize_ablation_results import collect, parse_report, tables
 from visualize_ablation_paper import scatter_path, memory_diagnostics, figure_grid, structure_figures, resolve_specs, resolve_splits, write_rows
 from visualize_ablation_paper import build_gt_index, rotate_gt_mask, load_external_gt
 from visualize_ablation_paper import select_stage_layers, comparison_groups
+from visualize_ablation_paper import automatic_gt_roi, mask_error_image, resolve_qualitative_cases, scan_display_name
 
 
 class ReportingTests(unittest.TestCase):
+    def test_qualitative_cases_roi_and_error_colours(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            images = [root/'curve.jpg', root/'branch.jpg']
+            for image in images:
+                image.write_bytes(b'placeholder')
+            cases_file = root/'cases.json'
+            cases_file.write_text('[{"label":"Curved","image":"curve.jpg","roi":[0.1,0.2,0.6,0.8]}]')
+            cases = resolve_qualitative_cases(cases_file, images)
+            self.assertEqual(cases[0]['image'], images[0])
+            self.assertEqual(cases[0]['roi'], (.1,.2,.6,.8))
+            gt = np.zeros((100,200), bool)
+            gt[45:55,95:105] = True
+            roi = automatic_gt_roi(gt, .2)
+            self.assertLess(roi[0], .5)
+            self.assertGreater(roi[2], .5)
+            pred = np.zeros_like(gt)
+            pred[50,100] = True
+            pred[1,1] = True
+            error = mask_error_image(pred, gt)
+            np.testing.assert_array_equal(error[50,100], [255,255,0])
+            np.testing.assert_array_equal(error[45,95], [113,116,255])
+            np.testing.assert_array_equal(error[1,1], [237,116,176])
+            self.assertEqual(scan_display_name('K01_crack-seg_seed1'), 'Adaptive')
+
     def test_external_gt_index_and_left_rotation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

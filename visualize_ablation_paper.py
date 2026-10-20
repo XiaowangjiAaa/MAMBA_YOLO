@@ -40,6 +40,14 @@ def parse_args():
     p.add_argument('--max-det', type=int, default=300)
     p.add_argument('--max-paths-draw', type=int, default=32, help='Only limits drawing, NOT coverage statistics')
     p.add_argument('--roi', help='Optional fixed normalized x1,y1,x2,y2 crop for ALL models/images')
+    p.add_argument('--qualitative-scanning', action='store_true',
+                   help='Create a paper-style Input/GT/Raster/Cross/... error-mask grid with identical ROIs')
+    p.add_argument('--qualitative-only', action='store_true',
+                   help='Skip feature/path exports and generate only predictions, metrics and the qualitative scanning figure')
+    p.add_argument('--qualitative-cases', type=Path,
+                   help='Optional JSON list: [{"label":"Curved","image":"name.jpg","roi":[x1,y1,x2,y2]}]; coordinates are normalized')
+    p.add_argument('--qualitative-roi-size', type=float, default=.28,
+                   help='GT-centred automatic square ROI side as a fraction of the shorter image side')
     p.add_argument('--output-dir', type=Path, default=Path('paper_visualizations/9.11'))
     return p.parse_args()
 
@@ -321,6 +329,164 @@ def write_rows(path, rows):
         writer.writerows(rows)
 
 
+SCAN_DISPLAY_NAMES = {
+    'K01': 'Adaptive', 'K02': 'Raster', 'K03': 'Cross',
+    'K04': 'Serpentine', 'K05': 'Diagonal', 'K06': 'Fixed straight',
+}
+
+
+def experiment_id(label):
+    return re.split(r'[_-]', label)[0]
+
+
+def scan_display_name(label):
+    eid = experiment_id(label)
+    return SCAN_DISPLAY_NAMES.get(eid, label)
+
+
+def validate_normalized_roi(roi):
+    roi = tuple(float(v) for v in roi)
+    if len(roi) != 4 or not (0 <= roi[0] < roi[2] <= 1 and 0 <= roi[1] < roi[3] <= 1):
+        raise ValueError(f'ROI {roi} must satisfy 0<=x1<x2<=1 and 0<=y1<y2<=1')
+    return roi
+
+
+def resolve_qualitative_cases(path, images):
+    """Resolve an optional, prediction-independent list of paper figure cases."""
+    if path is None:
+        return [{'label': image.stem, 'image': image, 'roi': None} for image in images]
+    raw = json.loads(Path(path).read_text(encoding='utf-8-sig'))
+    if not isinstance(raw, list) or not raw:
+        raise ValueError('--qualitative-cases must be a nonempty JSON list')
+    by_name, by_stem = {}, {}
+    for image in images:
+        by_name.setdefault(image.name.casefold(), []).append(image)
+        by_stem.setdefault(image.stem.casefold(), []).append(image)
+    cases = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict) or not item.get('image'):
+            raise ValueError(f'Qualitative case {index} needs an image field')
+        wanted = Path(str(item['image']))
+        direct = wanted.resolve() if wanted.is_absolute() else None
+        matches = [direct] if direct is not None and direct in images else by_name.get(wanted.name.casefold(), [])
+        if not matches:
+            matches = by_stem.get(wanted.stem.casefold(), [])
+        if len(matches) != 1:
+            raise ValueError(f'Qualitative image {item["image"]!r} matched {len(matches)} source images')
+        roi = validate_normalized_roi(item['roi']) if item.get('roi') is not None else None
+        cases.append({'label': str(item.get('label') or matches[0].stem), 'image': matches[0], 'roi': roi})
+    return cases
+
+
+def automatic_gt_roi(gt_mask, side_fraction=.28):
+    """Choose an ROI from GT alone, never from one model's prediction."""
+    if not 0 < side_fraction <= 1:
+        raise ValueError('--qualitative-roi-size must be in (0, 1]')
+    height, width = gt_mask.shape
+    side = max(1, int(round(min(height, width) * side_fraction)))
+    ys, xs = np.nonzero(gt_mask)
+    if len(xs):
+        # Median foreground location is stable for thin structures and cannot favour a model.
+        cx, cy = float(np.median(xs)), float(np.median(ys))
+    else:
+        cx, cy = (width - 1) / 2, (height - 1) / 2
+    x1 = int(np.clip(round(cx - side / 2), 0, max(width - side, 0)))
+    y1 = int(np.clip(round(cy - side / 2), 0, max(height - side, 0)))
+    return x1 / width, y1 / height, min(x1 + side, width) / width, min(y1 + side, height) / height
+
+
+def mask_error_image(pred, gt):
+    """Black-background RGB/BGR-safe evidence map: TP cyan, FN coral, FP purple."""
+    result = np.zeros((*gt.shape, 3), dtype=np.uint8)
+    result[pred & gt] = (255, 255, 0)       # BGR cyan
+    result[~pred & gt] = (113, 116, 255)    # BGR coral/red
+    result[pred & ~gt] = (237, 116, 176)    # BGR purple
+    return result
+
+
+def render_scanning_qualitative(args, split, images, cases, specs, metrics, group_out):
+    """Render the observable effect of scan methods, separately from path mechanics."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import ConnectionPatch, Patch, Rectangle
+    from visualize_seg_results import read_image
+
+    if not cases:
+        return
+    labels = {s['label'] for s in specs}
+    lookup = {(r['model'], r['image']): r for r in metrics if r['model'] in labels and r['gt_available']}
+    image_index = {str(image): i for i, image in enumerate(images)}
+    reference = next((s['label'] for s in specs if experiment_id(s['label']) == 'K02'), specs[0]['label'])
+    columns = [('Input', None), ('Ground truth', None)] + [(scan_display_name(s['label']), s['label']) for s in specs]
+    nrows, ncols = len(cases), len(columns)
+    fig = plt.figure(figsize=(2.7 * ncols, 3.9 * nrows + .9), facecolor='white')
+    grid = fig.add_gridspec(nrows * 2, ncols, height_ratios=sum(([1.0, .68] for _ in cases), []),
+                           hspace=.06, wspace=.06, left=.075, right=.99, top=.91, bottom=.10)
+    case_rows = []
+    for row_index, case in enumerate(cases):
+        image = case['image']
+        prefix = f'{image_index[str(image)]:04d}_{image.stem}'
+        first_folder = args.output_dir.resolve() / specs[0]['label'] / split / prefix
+        original = read_image(first_folder / 'input.png')
+        gt = read_image(first_folder / 'gt_union.png')[..., 0] > 0
+        roi = case['roi'] or automatic_gt_roi(gt, args.qualitative_roi_size)
+        x1, y1, x2, y2 = roi
+        height, width = gt.shape
+        px = (int(x1 * width), int(y1 * height), max(int(x2 * width), int(x1 * width) + 1),
+              max(int(y2 * height), int(y1 * height) + 1))
+        gt_view = np.zeros_like(original)
+        gt_view[gt] = 255
+        panels = [('Input', original, None, None), ('Ground truth', gt_view, None, None)]
+        reference_metrics = lookup.get((reference, str(image)))
+        record = {'split': split, 'case': case['label'], 'image': str(image),
+                  'roi_x1': x1, 'roi_y1': y1, 'roi_x2': x2, 'roi_y2': y2,
+                  'roi_source': 'manual_json' if case['roi'] is not None else 'automatic_gt_only'}
+        for spec in specs:
+            label = spec['label']
+            folder = args.output_dir.resolve() / label / split / prefix
+            panel = read_image(folder / f'{label}_error_mask.png')
+            metric = lookup.get((label, str(image)))
+            panels.append((scan_display_name(label), panel, metric, label))
+            if metric:
+                record[label + '_iou'] = metric.get('pixel_iou')
+                record[label + '_cldice'] = metric.get('cldice')
+        case_rows.append(record)
+        for col_index, (heading, panel, metric, model_label) in enumerate(panels):
+            top_ax = fig.add_subplot(grid[row_index * 2, col_index])
+            crop_ax = fig.add_subplot(grid[row_index * 2 + 1, col_index])
+            top_ax.imshow(panel[..., ::-1])
+            top_ax.add_patch(Rectangle((px[0], px[1]), px[2] - px[0], px[3] - px[1], fill=False,
+                                       edgecolor='#0877d1', linewidth=1.6, linestyle=(0, (4, 2))))
+            crop_ax.imshow(panel[px[1]:px[3], px[0]:px[2], ::-1])
+            for ax in (top_ax, crop_ax):
+                ax.axis('off')
+            if row_index == 0:
+                top_ax.set_title(heading, fontsize=12, fontweight='bold', pad=8)
+            if col_index == 0:
+                top_ax.text(-.08, .5, case['label'], transform=top_ax.transAxes, rotation=90,
+                            va='center', ha='right', fontsize=11, fontweight='bold')
+            if metric:
+                delta = ''
+                if reference_metrics and model_label != reference:
+                    delta = f"  ΔIoU {100 * (metric['pixel_iou'] - reference_metrics['pixel_iou']):+.1f} pp"
+                crop_ax.text(.5, -.08, f"IoU {metric['pixel_iou']:.3f}  clDice {metric['cldice']:.3f}{delta}",
+                             transform=crop_ax.transAxes, ha='center', va='top', fontsize=8)
+            fig.add_artist(ConnectionPatch(xyA=(px[0], px[3]), coordsA=top_ax.transData,
+                                           xyB=(0, 1), coordsB=crop_ax.transAxes,
+                                           color='#0877d1', linewidth=.65, alpha=.7))
+            fig.add_artist(ConnectionPatch(xyA=(px[2], px[3]), coordsA=top_ax.transData,
+                                           xyB=(1, 1), coordsB=crop_ax.transAxes,
+                                           color='#0877d1', linewidth=.65, alpha=.7))
+    fig.suptitle('(A) Qualitative scanning ablation: effect on segmentation', fontsize=15, fontweight='bold', y=.975)
+    fig.legend(handles=[Patch(color='#00ffff', label='Correct (TP)'), Patch(color='#ff7471', label='Missed (FN)'),
+                        Patch(color='#b074ed', label='Extra (FP)')],
+               loc='lower center', ncol=3, frameon=False, fontsize=10)
+    output = group_out / 'scanning_qualitative_effect'
+    for suffix in ('png', 'pdf'):
+        fig.savefig(output.with_suffix('.' + suffix), dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    write_rows(group_out / 'scanning_qualitative_cases.csv', case_rows)
+
+
 def load_core(spec, device):
     from ultralytics import YOLO
     from ultralytics.nn.tasks import SegmentationModel
@@ -447,9 +613,13 @@ def run_split(args, specs, split):
         raise ValueError('imgsz must be a positive multiple of 32; counts must be nonnegative')
     if not 0 <= args.conf <= 1 or not 0 <= args.iou <= 1 or args.max_det < 1:
         raise ValueError('Invalid prediction thresholds/max-det')
-    roi = tuple(map(float, args.roi.split(','))) if args.roi else None
-    if roi and (len(roi) != 4 or not (0 <= roi[0] < roi[2] <= 1 and 0 <= roi[1] < roi[3] <= 1)):
-        raise ValueError('ROI must satisfy 0<=x1<x2<=1, 0<=y1<y2<=1')
+    roi = validate_normalized_roi(args.roi.split(',')) if args.roi else None
+    if not 0 < args.qualitative_roi_size <= 1:
+        raise ValueError('--qualitative-roi-size must be in (0, 1]')
+    if args.qualitative_only and not args.qualitative_scanning:
+        raise ValueError('--qualitative-only requires --qualitative-scanning')
+    if args.qualitative_only and any(experiment_id(s['label']) not in SCAN_DISPLAY_NAMES for s in specs):
+        raise ValueError('--qualitative-only accepts scanning ablations K01-K06 only')
     from visualize_seg_results import (GroundTruth, prepare_device_environment, resolve_source, read_image, write_image,
                                        load_yolo_segmentation_gt, instance_visualization, union_metrics)
     prepare_device_environment(args.device)
@@ -463,8 +633,13 @@ def run_split(args, specs, split):
     device = torch.device('cpu' if args.device == 'cpu' else ('cuda:' + args.device if args.device.isdigit() else args.device))
     images, root, _ = resolve_source(Path(args.source).resolve(), split, True)
     images = sorted(set(images))
-    if args.max_images and len(images) > args.max_images:
-        images = sorted(random.Random(args.sample_seed).sample(images, args.max_images))
+    if args.qualitative_scanning and args.qualitative_cases:
+        qualitative_cases = resolve_qualitative_cases(args.qualitative_cases, images)
+        images = [case['image'] for case in qualitative_cases]
+    else:
+        if args.max_images and len(images) > args.max_images:
+            images = sorted(random.Random(args.sample_seed).sample(images, args.max_images))
+        qualitative_cases = resolve_qualitative_cases(None, images) if args.qualitative_scanning else []
     if not images:
         raise ValueError('No source images')
     gt_index = build_gt_index(args.gt_dir)
@@ -484,7 +659,12 @@ def run_split(args, specs, split):
         (model_out / 'manifest.json').write_text(json.dumps({**manifest, 'models': [spec]}, indent=2), encoding='utf-8')
         print(f"Loading {spec['label']}: {spec['weights']}", flush=True)
         core = load_core(spec, device)
-        plan, states = discover_layers(core, spec, args.imgsz, device)
+        if args.qualitative_only:
+            plan = {'features': {}, 'mechanisms': [], 'mechanism_roles': {}, 'mechanism_status': 'skipped',
+                    'selection': 'Skipped by --qualitative-only'}
+            states = {}
+        else:
+            plan, states = discover_layers(core, spec, args.imgsz, device)
         spec['resolved_plan'] = plan
         (model_out / 'layer_plan.json').write_text(json.dumps(plan, indent=2), encoding='utf-8')
         print(f"  Features: {plan['features']}; mechanisms: {plan['mechanisms'] or plan['mechanism_status']}", flush=True)
@@ -543,6 +723,9 @@ def run_split(args, specs, split):
                 for active, color in [(pu & gt_union, (0,210,0)), (pu & ~gt_union, (0,0,255)), (~pu & gt_union, (255,0,0))]:
                     error[active] = color
                 gt_view[gt_union] = (.5*gt_view[gt_union] + .5*np.array([0,255,255])).astype(np.uint8)
+                write_image(folder / 'gt_union.png', gt_union.astype(np.uint8) * 255)
+                write_image(folder / f'{spec["label"]}_pred_union.png', pu.astype(np.uint8) * 255)
+                write_image(folder / f'{spec["label"]}_error_mask.png', mask_error_image(pu, gt_union))
             write_image(folder / f"{spec['label']}_error.png", error)
             write_image(folder / 'gt.png', gt_view)
             metrics.append({'model': spec['label'], 'split': split, 'image': str(image_path), 'gt_available': known_gt,
@@ -584,6 +767,12 @@ def run_split(args, specs, split):
         group_metrics = [r for r in metrics if r['model'] in {s['label'] for s in subset}]
         write_rows(group_out/'per_image_metrics.csv', group_metrics)
         paired_plot(group_metrics, subset, group_out)
+        if args.qualitative_scanning and group == 'scanning':
+            if not all(r['gt_available'] for r in group_metrics):
+                raise ValueError('--qualitative-scanning requires GT for every selected image/model')
+            render_scanning_qualitative(args, split, images, qualitative_cases, subset, group_metrics, group_out)
+        if args.qualitative_only:
+            continue
         roles = list(dict.fromkeys(k for s in subset for k in s['resolved_plan']['features']
                                    if k.startswith(role_prefix) or k.startswith('manual_')))
         if not roles:

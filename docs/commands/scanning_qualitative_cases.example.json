@@ -1,0 +1,17 @@
+[
+  {
+    "label": "Curved crack",
+    "image": "REPLACE_CURVED_IMAGE.jpg",
+    "roi": [0.20, 0.20, 0.52, 0.52]
+  },
+  {
+    "label": "Branching crack",
+    "image": "REPLACE_BRANCHING_IMAGE.jpg",
+    "roi": [0.30, 0.25, 0.62, 0.57]
+  },
+  {
+    "label": "Low-contrast crack",
+    "image": "REPLACE_LOW_CONTRAST_IMAGE.jpg",
+    "roi": [0.38, 0.35, 0.70, 0.67]
+  }
+]
