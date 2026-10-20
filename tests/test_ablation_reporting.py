@@ -9,10 +9,31 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from summarize_ablation_results import collect, parse_report, tables
 from visualize_ablation_paper import scatter_path, memory_diagnostics, figure_grid, structure_figures, resolve_specs, resolve_splits, write_rows
+from visualize_ablation_paper import build_gt_index, rotate_gt_mask, load_external_gt
 from visualize_ablation_paper import select_stage_layers, comparison_groups
 
 
 class ReportingTests(unittest.TestCase):
+    def test_external_gt_index_and_left_rotation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root/'1.png').write_bytes(b'placeholder')
+            index = build_gt_index(root)
+            self.assertEqual(index['1'].name, '1.png')
+            portrait = np.arange(12).reshape(4,3)
+            left = rotate_gt_mask(portrait, 'left')
+            self.assertEqual(left.shape, (3,4))
+            np.testing.assert_array_equal(left, np.rot90(portrait,1))
+            from PIL import Image
+            Image.fromarray((portrait > 5).astype(np.uint8)*255).save(root/'mask.png')
+            mask, path = load_external_gt(Path('mask.jpg'), {'mask':root/'mask.png'}, (3,4), 'left')
+            self.assertEqual(mask.shape, (3,4))
+            self.assertEqual(path.name, 'mask.png')
+            (root/'nested').mkdir()
+            (root/'nested'/'1.jpg').write_bytes(b'duplicate')
+            with self.assertRaises(ValueError):
+                build_gt_index(root)
+
     def test_auto_stages_real_yaml_topologies(self):
         import yaml
         repo = Path(__file__).resolve().parents[1]
@@ -48,6 +69,14 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual([s['label'][:3] for s in groups['family_v9'][0]], ['K28','K29'])
         self.assertEqual([s['label'][:3] for s in groups['family_v5'][0]], ['K30','K31'])
 
+    def test_semantic_role_uses_resolved_mechanism_plan(self):
+        from visualize_ablation_paper import semantic_role
+        plan = {'features': {'neck_P3':'model.16'},
+                'mechanism_roles': {'model.13.m.0.path':'neck_intermediate_P4',
+                                    'model.16.m.1.path':'neck_P3'}}
+        self.assertEqual(semantic_role('model.13.m.0.path', plan), 'neck_intermediate_P4')
+        self.assertEqual(semantic_role('model.16.m.1.path', plan), 'neck_P3')
+
     def test_all_runs_includes_all_seeds_and_skips_missing_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -76,6 +105,9 @@ class ReportingTests(unittest.TestCase):
             source.write_text('train: images/train\nval: images/val\ntest: null\n')
             self.assertEqual(resolve_splits(source, 'all'), ['train', 'val'])
             self.assertEqual(resolve_splits(source, 'test'), ['test'])
+            self.assertEqual(resolve_splits(root/'images', 'external'), ['external'])
+            with self.assertRaises(ValueError):
+                resolve_splits(source, 'external')
             with self.assertRaises(ValueError):
                 resolve_splits(root/'image.jpg', 'all')
             for split in ('train', 'val'):

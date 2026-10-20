@@ -4,6 +4,21 @@ __pycache__/
 *$py.class
 .idea
 output_dir/
+predictresults/
+paper_visualizations/
+visualization_results/
+feature_visualization/
+feature_comparison/
+tmp/
+
+# Generated model/export artifacts. Existing explicitly tracked weights remain tracked.
+*.pth
+*.onnx
+*.engine
+*.torchscript
+epoch*.pt
+best*.pt
+last.pt
 ultralytics.egg-info
 examples
 # C extensions

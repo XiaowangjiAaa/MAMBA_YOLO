@@ -23,11 +23,14 @@ def parse_args():
     p.add_argument('--experiments', nargs='+', default=['K01', 'K06', 'K10'], help='IDs or all: discover every run/seed with the selected checkpoint')
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--checkpoint', default='best_map50.pt')
-    p.add_argument('--manifest', type=Path, help='JSON list of {label,weights,yaml(optional),layers(optional)}; overrides runs')
+    p.add_argument('--manifest', type=Path, help='JSON list of model specs; layers/mechanism_layers may override auto selection')
     p.add_argument('--source', required=True, help='Image / directory / TXT / dataset YAML')
-    p.add_argument('--split', choices=['train', 'val', 'test', 'all'], default='val', help='all = every declared train/val/test split in --source YAML')
+    p.add_argument('--split', choices=['train', 'val', 'test', 'external', 'all'], default='val', help='all = YAML train/val/test; external = label a direct image folder as an external set')
+    p.add_argument('--gt-dir', type=Path, help='Optional directory of raster GT masks matched to images by filename stem')
+    p.add_argument('--gt-rotate', choices=['none', 'left', 'right', '180'], default='none', help='Rotate raster GT before comparison; left = 90 degrees counter-clockwise')
+    p.add_argument('--gt-invert', action='store_true', help='Treat zero pixels as foreground in raster GT masks')
     p.add_argument('--layers', '--feature-layers', dest='layers', default='auto', help='auto = discover backbone/neck stages; or comma-separated layer indices/names')
-    p.add_argument('--mechanism-layers', default='auto', help='auto = all actual CPSB states; none = disabled; or parent layer indices/names')
+    p.add_argument('--mechanism-layers', default='auto', help='auto = every actual CPSB state (independent of feature layers); none = disabled; or parent layer indices/names')
     p.add_argument('--max-images', type=int, default=6, help='0 = all images; random selection independent of predictions')
     p.add_argument('--sample-seed', type=int, default=1)
     p.add_argument('--imgsz', type=int, default=640)
@@ -183,10 +186,34 @@ def discover_layers(core, spec, imgsz, device):
               and policy != 'none' and (parents is None or any(n == p or n.startswith(p+'.') for p in parents))}
     if parents and not states:
         raise ValueError('Selected mechanism layers contain no CPSB path state')
-    plan = {'features': features, 'mechanisms': list(states),
+    backbone_count = len(core.yaml.get('backbone', []))
+    stage_for_stride = {4:'P2', 8:'P3', 16:'P4', 32:'P5'}
+    mechanism_roles = {}
+    for name in states:
+        match = re.match(r'^model\.(\d+)(?:\.|$)', name)
+        index = int(match.group(1)) if match else None
+        exact = next((role for role,parent in features.items()
+                      if name == parent or name.startswith(parent+'.')), None)
+        if exact:
+            mechanism_roles[name] = exact
+        elif index is not None and shapes.get(index) in stage_for_stride:
+            region = 'backbone' if index < backbone_count else 'neck_intermediate'
+            mechanism_roles[name] = region+'_'+stage_for_stride[shapes[index]]
+        else:
+            mechanism_roles[name] = 'non_output_stage'
+    plan = {'features': features, 'mechanisms': list(states), 'mechanism_roles': mechanism_roles,
             'mechanism_status': 'found' if states else ('disabled' if policy=='none' else 'no CPSB in model'),
             'selection': 'Observed spatial strides + checkpoint backbone boundary + segmentation head inputs'}
     return plan, states
+
+
+def semantic_role(module_name, plan):
+    """Map a nested CPSB state back to its containing semantic top-level stage."""
+    if module_name in plan.get('mechanism_roles', {}):
+        return plan['mechanism_roles'][module_name]
+    matches = [(role, parent) for role, parent in plan['features'].items()
+               if module_name == parent or module_name.startswith(parent + '.')]
+    return max(matches, key=lambda item: len(item[1]))[0] if matches else 'non_output_stage'
 
 
 def comparison_groups(specs):
@@ -211,6 +238,10 @@ def comparison_groups(specs):
 
 
 def resolve_splits(source, requested):
+    if requested == 'external':
+        if source.suffix.lower() in {'.yaml', '.yml'}:
+            raise ValueError('--split external is for an image/TXT/directory source, not a dataset YAML')
+        return ['external']
     if requested != 'all':
         return [requested]
     if source.suffix.lower() not in {'.yaml', '.yml'}:
@@ -226,6 +257,58 @@ def resolve_splits(source, requested):
         if s not in splits:
             print(f'[SKIP] Dataset split {s} is not declared', flush=True)
     return splits
+
+
+def build_gt_index(gt_dir):
+    """Index raster masks by stem and reject ambiguous names."""
+    if gt_dir is None:
+        return None
+    gt_dir = Path(gt_dir).resolve()
+    if not gt_dir.is_dir():
+        raise NotADirectoryError(gt_dir)
+    supported = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
+    index = {}
+    for path in sorted(p for p in gt_dir.rglob('*') if p.is_file() and p.suffix.lower() in supported):
+        key = path.stem.casefold()
+        if key in index:
+            raise ValueError(f'Ambiguous GT stem {path.stem!r}: {index[key]} and {path}')
+        index[key] = path
+    if not index:
+        raise ValueError(f'No raster GT masks found in {gt_dir}')
+    return index
+
+
+def rotate_gt_mask(mask, rotation):
+    turns = {'none':0, 'left':1, '180':2, 'right':3}[rotation]
+    return np.rot90(mask, turns).copy() if turns else mask.copy()
+
+
+def load_external_gt(image_path, gt_index, image_shape, rotation='none', invert=False):
+    """Load a binary raster GT mask without resizing it into apparent alignment."""
+    from PIL import Image
+    path = gt_index.get(image_path.stem.casefold())
+    if path is None:
+        raise FileNotFoundError(f'No GT mask with stem {image_path.stem!r} for {image_path}')
+    with Image.open(path) as source:
+        raw = np.asarray(source)
+    if raw.ndim == 3:
+        raw = raw[..., :3].max(axis=2)
+    mask = raw == 0 if invert else raw != 0
+    mask = rotate_gt_mask(mask, rotation)
+    if mask.shape != tuple(image_shape):
+        raise ValueError(
+            f'GT/image shape mismatch after rotation={rotation}: {path} is {mask.shape}, '
+            f'{image_path} is {tuple(image_shape)}. Refusing to resize GT.'
+        )
+    return mask.astype(bool), path
+
+
+def read_exif_upright_image(path):
+    """Return EXIF-normalized BGR so rotated raster GT is checked against displayed pixels."""
+    from PIL import Image, ImageOps
+    with Image.open(path) as source:
+        rgb = np.asarray(ImageOps.exif_transpose(source).convert('RGB'))
+    return np.ascontiguousarray(rgb[..., ::-1])
 
 
 def write_rows(path, rows):
@@ -367,7 +450,7 @@ def run_split(args, specs, split):
     roi = tuple(map(float, args.roi.split(','))) if args.roi else None
     if roi and (len(roi) != 4 or not (0 <= roi[0] < roi[2] <= 1 and 0 <= roi[1] < roi[3] <= 1)):
         raise ValueError('ROI must satisfy 0<=x1<x2<=1, 0<=y1<y2<=1')
-    from visualize_seg_results import (prepare_device_environment, resolve_source, read_image, write_image,
+    from visualize_seg_results import (GroundTruth, prepare_device_environment, resolve_source, read_image, write_image,
                                        load_yolo_segmentation_gt, instance_visualization, union_metrics)
     prepare_device_environment(args.device)
     import torch
@@ -384,6 +467,7 @@ def run_split(args, specs, split):
         images = sorted(random.Random(args.sample_seed).sample(images, args.max_images))
     if not images:
         raise ValueError('No source images')
+    gt_index = build_gt_index(args.gt_dir)
     out = args.output_dir.resolve() / 'comparisons' / split
     out.mkdir(parents=True, exist_ok=True)
     manifest = {'arguments': {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
@@ -410,16 +494,22 @@ def run_split(args, specs, split):
             prefix = f'{image_index:04d}_{image_path.stem}'
             folder = model_out / prefix
             folder.mkdir(exist_ok=True)
-            image = read_image(image_path)
+            image = read_exif_upright_image(image_path) if gt_index is not None else read_image(image_path)
             h, w = image.shape[:2]
             canvas, tensor, valid_pixels, meta = preprocess(image, args.imgsz, device, torch)
-            gt = load_yolo_segmentation_gt(image_path, h, w, root)
-            known_gt = gt.label_path is not None
-            if known_gt:
+            if gt_index is not None:
+                gt_union, gt_path = load_external_gt(image_path, gt_index, (h, w), args.gt_rotate, args.gt_invert)
+                masks = gt_union[None] if gt_union.any() else np.zeros((0, h, w), dtype=bool)
+                gt = GroundTruth(masks, np.zeros(len(masks), dtype=np.int64), gt_path)
+                known_gt = True
+            else:
+                gt = load_yolo_segmentation_gt(image_path, h, w, root)
+                known_gt = gt.label_path is not None
+                gt_union = gt.masks.any(0) if known_gt else None
+            if known_gt and gt_index is None:
                 lines = [s.split() for s in gt.label_path.read_text(encoding='utf-8-sig').splitlines() if s.strip()]
                 if gt.malformed_lines or any(len(s) < 7 for s in lines):
                     raise ValueError(f'Require true, valid segmentation polygons: {gt.label_path}')
-            gt_union = gt.masks.any(0) if known_gt else None
             gt_square = letterbox_mask(gt_union, args.imgsz, meta) if known_gt else None
             features, memory, handles = {}, {}, []
             for name in layers:
@@ -457,6 +547,8 @@ def run_split(args, specs, split):
             write_image(folder / 'gt.png', gt_view)
             metrics.append({'model': spec['label'], 'split': split, 'image': str(image_path), 'gt_available': known_gt,
                             'gt_label': str(gt.label_path) if known_gt else '',
+                            'gt_format': 'raster_mask' if gt_index is not None else 'yolo_polygon',
+                            'gt_rotation': args.gt_rotate if gt_index is not None else 'none',
                             **(union_metrics(pm, gt.masks) if known_gt else {})})
             for role, name in plan['features'].items():
                 if name not in features:
@@ -472,7 +564,8 @@ def run_split(args, specs, split):
                 if name in memory:
                     rows = structure_figures(name, state, memory[name], canvas, gt_square, valid_pixels,
                                              folder / (spec['label']+'_'+name.replace('.', '_')+'_structure'), args.max_paths_draw)
-                    routing.extend({'model': spec['label'], 'split': split, 'image': str(image_path), **r} for r in rows)
+                    routing.extend({'model': spec['label'], 'split': split, 'image': str(image_path),
+                                    'semantic_role': semantic_role(name, plan), **r} for r in rows)
             print(f"  {spec['label']} / {split} {image_index+1}/{len(images)} {image_path.name}", flush=True)
             del pred, tensor, nms, masks, features, memory
         del core, modules, states
@@ -527,6 +620,8 @@ def run_split(args, specs, split):
 def main():
     args = parse_args()
     specs = resolve_specs(args)
+    if args.gt_dir is not None and args.split == 'all':
+        raise ValueError('--gt-dir with a flat image directory uses one logical split; do not combine it with --split all')
     splits = resolve_splits(Path(args.source).resolve(), args.split)
     out = args.output_dir.resolve()
     if out.exists() and any(out.iterdir()):
