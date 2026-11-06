@@ -169,11 +169,25 @@ class Annotator:
                 # NOTE: PIL-version polygon needs tuple type.
                 self.draw.polygon([tuple(b) for b in box], width=self.lw, outline=color)
             else:
-                p1 = (box[0], box[1])
+                p1 = (int(box[0]), int(box[1]))
                 self.draw.rectangle(box, width=self.lw, outline=color)  # box
             if label:
                 w, h = self.font.getsize(label)  # text width, height
                 outside = p1[1] - h >= 0  # label fits outside box
+                if p1[0] > self.im.size[0] - w:
+                    p1 = self.im.size[0] - w, p1[1]
+                if color in {
+                    (235, 219, 11),
+                    (243, 243, 243),
+                    (183, 223, 0),
+                    (221, 111, 255),
+                    (0, 237, 204),
+                    (68, 243, 0),
+                    (255, 255, 0),
+                    (179, 255, 1),
+                    (11, 255, 162),
+                }:
+                    txt_color = (104, 31, 17)
                 self.draw.rectangle(
                     (p1[0], p1[1] - h if outside else p1[1], p1[0] + w + 1, p1[1] + 1 if outside else p1[1] + h + 1),
                     fill=color,

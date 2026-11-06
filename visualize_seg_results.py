@@ -49,6 +49,16 @@ except ImportError:  # Keep --help usable in an environment missing optional run
 IMAGE_SUFFIXES = {".bmp", ".dng", ".jpeg", ".jpg", ".mpo", ".png", ".tif", ".tiff", ".webp"}
 AP_THRESHOLDS = np.arange(0.50, 0.96, 0.05)
 
+# 用户配色区：RGB 十六进制，类别 0 默认蓝色；红色 #FF0000，绿色 #00FF00。
+CLASS_COLORS = {0: "#042AFF"}
+MASK_ALPHA = 0.5  # 掩膜不透明度：0 完全透明，1 完全不透明；命令行 --alpha 可覆盖。
+COLOR_VARIANTS = {}  # {配色名称: {类别编号: RGB 十六进制}}；空字典仅输出 CLASS_COLORS。
+ERROR_COLORS = {"FP": "#D98282", "FN": "#D8AD63"}
+GT_DIR = None  # 显式 GT 目录：同名 YOLO 分割 TXT 或黑底非零前景二值图片。
+SAVE_MASK_OVERLAYS = True
+SKIP_EXISTING = False
+SPLIT = "all"
+
 
 @dataclass
 class GroundTruth:
@@ -58,7 +68,7 @@ class GroundTruth:
     malformed_lines: int = 0
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Visualize YOLO segmentation predictions and export per-image/dataset metrics.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -101,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--alpha",
         type=float,
-        default=0.5,
+        default=MASK_ALPHA,
         help="Mask overlay opacity (0.5 matches the Ultralytics default)",
     )
     parser.add_argument("--line-width", type=int, default=2)
@@ -113,7 +123,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--save-json", action="store_true", help="Also save summary_metrics.json")
     parser.add_argument("--no-images", action="store_true", help="Calculate CSV metrics without saving overlays")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def prepare_device_environment(device) -> Optional[str]:
@@ -265,11 +275,23 @@ def load_yolo_segmentation_gt(
     height: int,
     width: int,
     dataset_root: Optional[Path],
+    label_path: Optional[Path] = None,
 ) -> GroundTruth:
     """Rasterize YOLO polygon labels; five-value box labels are also accepted."""
-    label_path = find_label_path(image_path, dataset_root)
-    if label_path is None:
+    label_path = label_path if label_path is not None else find_label_path(image_path, dataset_root)
+    if label_path is None or not label_path.is_file():
         return GroundTruth(np.zeros((0, height, width), dtype=bool), np.zeros(0, dtype=np.int64), None)
+    if label_path.suffix.lower() != ".txt":
+        raw = cv2.imdecode(np.fromfile(str(label_path), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if raw is None:
+            raise ValueError(f"Cannot read GT mask: {label_path}")
+        if raw.ndim == 3:
+            raw = raw[..., :3].max(axis=2)
+        if raw.shape != (height, width):
+            raise ValueError(f"GT/image shape mismatch: {raw.shape} != {(height, width)}: {label_path}")
+        masks = (raw > 0)[None]
+        masks = masks if masks.any() else masks[:0]
+        return GroundTruth(masks, np.zeros(len(masks), dtype=np.int64), label_path)
 
     masks: List[np.ndarray] = []
     classes: List[int] = []
@@ -374,7 +396,7 @@ def load_model(weights: Path, model_yaml: Optional[Path]):
                 }
 
             filtered = max((matching_tensors(candidate) for candidate in variants), key=len)
-            result = target.load_state_dict(filtered, strict=False)
+            target.load_state_dict(filtered, strict=False)
             matched = len(filtered)
             if matched <= 0:
                 raise RuntimeError("raw state_dict did not match any model parameter")
@@ -679,58 +701,33 @@ def instance_visualization(
     names,
     alpha: float,
     line_width: int,
+    class_colors: Optional[dict] = None,
 ) -> np.ndarray:
     """Draw standard instance-segmentation masks, boxes, class names, and confidence scores."""
-    canvas = image.copy()
     line_width = max(int(line_width), 1)
+    palette = dict(enumerate(ULTRALYTICS_CLASS_COLORS_BGR))
+    palette.update({key: tuple(bytes.fromhex(value.lstrip("#")))[::-1] for key, value in (class_colors or CLASS_COLORS).items()})
 
-    # Blend every instance independently so different classes remain visually separable.
-    for index, mask in enumerate(pred_masks):
+    # Paint instance colors first, then blend once so overlaps do not alter opacity.
+    overlay = image.copy()
+    for class_id, mask in zip(pred_classes, pred_masks):
+        class_id = int(class_id)
+        color = palette.get(class_id, ULTRALYTICS_CLASS_COLORS_BGR[class_id % len(ULTRALYTICS_CLASS_COLORS_BGR)])
+        overlay[mask.astype(bool)] = color
+    canvas = cv2.addWeighted(image, 1.0 - alpha, overlay, alpha, 0)
+
+    if not len(boxes):
+        return canvas
+    from ultralytics.utils.plotting import Annotator
+
+    annotator = Annotator(canvas, line_width=line_width, font="Arial.ttf", pil=True, example=names)
+    # Match Results.plot(): reverse draw order, class label and two-decimal confidence.
+    for index in reversed(range(len(boxes))):
         class_id = int(pred_classes[index])
-        color = ULTRALYTICS_CLASS_COLORS_BGR[class_id % len(ULTRALYTICS_CLASS_COLORS_BGR)]
-        active = mask.astype(bool)
-        if active.any():
-            color_layer = np.empty_like(canvas)
-            color_layer[:] = color
-            blended = cv2.addWeighted(canvas, 1.0 - alpha, color_layer, alpha, 0)
-            canvas[active] = blended[active]
-            contours, _ = cv2.findContours(active.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(canvas, contours, -1, color, line_width)
-
-    for index, box in enumerate(boxes):
-        class_id = int(pred_classes[index])
-        color = ULTRALYTICS_CLASS_COLORS_BGR[class_id % len(ULTRALYTICS_CLASS_COLORS_BGR)]
-        x1, y1, x2, y2 = box.round().astype(int)
-        x1 = int(np.clip(x1, 0, image.shape[1] - 1))
-        y1 = int(np.clip(y1, 0, image.shape[0] - 1))
-        x2 = int(np.clip(x2, 0, image.shape[1] - 1))
-        y2 = int(np.clip(y2, 0, image.shape[0] - 1))
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, line_width)
-
+        color = palette.get(class_id, ULTRALYTICS_CLASS_COLORS_BGR[class_id % len(ULTRALYTICS_CLASS_COLORS_BGR)])
         label = f"{class_name(names, class_id)} {float(confidences[index]):.2f}"
-        font_scale = max(0.45, line_width * 0.22)
-        text_thickness = max(1, line_width - 1)
-        (text_width, text_height), baseline = cv2.getTextSize(
-            label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thickness
-        )
-        label_top = y1 - text_height - baseline - 4
-        if label_top < 0:
-            label_top = y1
-        label_bottom = min(label_top + text_height + baseline + 4, image.shape[0] - 1)
-        label_right = min(x1 + text_width + 6, image.shape[1] - 1)
-        cv2.rectangle(canvas, (x1, label_top), (label_right, label_bottom), color, thickness=-1)
-        text_y = min(label_top + text_height + 2, label_bottom - baseline)
-        cv2.putText(
-            canvas,
-            label,
-            (x1 + 3, text_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            font_scale,
-            (255, 255, 255),
-            text_thickness,
-            cv2.LINE_AA,
-        )
-    return canvas
+        annotator.box_label(boxes[index].tolist(), label, color=color)
+    return annotator.result()
 
 
 def overlay_visualization(
@@ -775,7 +772,7 @@ def overlay_visualization(
     cv2.putText(canvas, legend, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
     if metrics is not None:
         text = (
-            f"AP50 {metrics['mask_ap50']:.3f}  IoU {metrics['pixel_iou']:.3f}  "
+            f"AP50 {metrics.get('mask_ap50', math.nan):.3f}  IoU {metrics['pixel_iou']:.3f}  "
             f"Dice {metrics['pixel_dice']:.3f}  clDice {metrics['cldice']:.3f}"
         )
         cv2.putText(canvas, text, (8, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1)
@@ -818,10 +815,7 @@ def process_source(
 ) -> None:
     """Process one dataset split, or one ordinary image source."""
     source = source.expanduser()
-    image_dir = output_dir / "images"
     output_dir.mkdir(parents=True, exist_ok=True)
-    if not args.no_images:
-        image_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_mode = is_dataset_yaml(source)
     resolved_split = split or "val"  # Ignored for an ordinary image source.
@@ -830,6 +824,46 @@ def process_source(
         images = images[: args.max_images]
     if not images:
         raise FileNotFoundError(f"no supported images resolved from: {source}")
+
+    variants = COLOR_VARIANTS or {"": CLASS_COLORS}
+    gt_index = None
+    if GT_DIR is not None:
+        gt_root = Path(GT_DIR).expanduser().resolve()
+        if not gt_root.is_dir():
+            raise NotADirectoryError(f"GT directory not found: {gt_root}")
+        gt_index = {}
+        for path in sorted(gt_root.rglob("*")):
+            if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES | {".txt"}:
+                key = path.stem.casefold()
+                if key in gt_index:
+                    raise ValueError(f"Ambiguous GT name: {gt_index[key]} and {path}")
+                gt_index[key] = path
+    label_paths = {}
+    pending = {}
+    for index, image_path in enumerate(images, start=1):
+        label_paths[image_path] = (
+            gt_index.get(image_path.stem.casefold(), gt_root / image_path.with_suffix(".txt").name)
+            if gt_index is not None
+            else find_label_path(image_path, dataset_root)
+        )
+        label_path = label_paths[image_path]
+        directories = [Path("masks")]
+        if label_path is not None and label_path.is_file():
+            directories.append(Path("gt_masks"))
+            directories.extend(Path(kind) / variant for kind in ("errors", "errors_white") for variant in variants)
+        if SAVE_MASK_OVERLAYS:
+            directories.extend(Path("overlays") / variant for variant in variants)
+        if args.visual_style == "diagnostic":
+            directories = [Path("images")]
+        expected = [output_dir / directory / f"{index:06d}_{image_path.name}.png" for directory in directories]
+        if SKIP_EXISTING and not args.no_images and all(path.is_file() and path.stat().st_size for path in expected):
+            print(f"[{index}/{len(images)}] complete, skipped: {image_path.name}")
+            continue
+        pending[image_path] = index
+    skipped = len(images) - len(pending)
+    if not pending:
+        print(f"All {skipped} images already generated; existing CSV files retained.")
+        return
 
     print(f"Source:  {source.resolve()}")
     print(f"Mode:    {'dataset YAML / ' + resolved_split if dataset_mode else 'image source'}")
@@ -847,9 +881,9 @@ def process_source(
     # call PIL.Image.open() for every image at once and can exceed Linux's open-file
     # limit. A TXT manifest selects LoadImagesAndVideos instead, which opens only
     # one inference batch at a time and also makes the resolved input set auditable.
-    source_manifest = output_dir / "resolved_images.txt"
+    source_manifest = output_dir / "pending_images.txt"
     with source_manifest.open("w", encoding="utf-8", newline="\n") as stream:
-        for image_path in images:
+        for image_path in pending:
             stream.write(f"{image_path}\n")
 
     predict_kwargs = dict(
@@ -860,6 +894,7 @@ def process_source(
         iou=args.iou,
         device=args.device,
         batch=args.batch,
+        retina_masks=True,
         workers=args.workers,
         verbose=False,
         save=False,
@@ -870,9 +905,9 @@ def process_source(
     global_tp = global_fp = global_fn = 0
     started = time.perf_counter()
 
-    for index, result in enumerate(results, start=1):
-        result_path = getattr(result, "path", "")
-        image_path = Path(result_path).expanduser().resolve() if result_path else images[index - 1]
+    for result in results:
+        image_path = Path(result.path).expanduser().resolve()
+        index = pending[image_path]
         original = getattr(result, "orig_img", None)
         image = original.copy() if isinstance(original, np.ndarray) else read_image(image_path)
         if image is None:
@@ -889,7 +924,9 @@ def process_source(
         visual_boxes = boxes[visual_select]
         speed = getattr(result, "speed", {}) or {}
         inference_ms = float(speed.get("inference", math.nan))
-        gt = load_yolo_segmentation_gt(image_path, height, width, dataset_root) if dataset_mode else None
+        gt = load_yolo_segmentation_gt(image_path, height, width, dataset_root, label_path=label_paths[image_path])
+        if gt.label_path is None:
+            gt = None
 
         row = {
             "index": index,
@@ -909,50 +946,115 @@ def process_source(
         }
         visual_metrics = None
         if gt is not None:
-            image_ap50, image_map, matches = image_mask_ap(
-                pred_masks, pred_classes, confidences, gt.masks, gt.classes
-            )
             pixel = union_metrics(visual_masks, gt.masks)
             row.update(pixel)
-            row.update({"mask_ap50": image_ap50, "mask_map50_95": image_map})
             visual_metrics = row
-            accumulator.update(pred_classes, confidences, gt.classes, matches)
             global_tp += pixel["pixel_tp"]
             global_fp += pixel["pixel_fp"]
             global_fn += pixel["pixel_fn"]
+            # Binary raster GT has no instance identities: only TXT labels support mask AP here.
+            if gt.label_path.suffix.lower() == ".txt":
+                image_ap50, image_map, matches = image_mask_ap(
+                    pred_masks, pred_classes, confidences, gt.masks, gt.classes
+                )
+                row.update({"mask_ap50": image_ap50, "mask_map50_95": image_map})
+                accumulator.update(pred_classes, confidences, gt.classes, matches)
 
         if not args.no_images:
-            if args.visual_style == "instance":
-                names = getattr(result, "names", None)
-                if names is None and dataset_config is not None:
-                    names = dataset_config.get("names", {})
-                visual = instance_visualization(
+            pred_union = visual_masks.any(axis=0) if len(visual_masks) else np.zeros((height, width), dtype=bool)
+            output_name = f"{index:06d}_{image_path.name}.png"
+            visuals = {"masks": pred_union.astype(np.uint8) * 255}
+            empty_boxes = np.zeros((0, 4), dtype=np.float32)
+            empty_masks = np.zeros((0, height, width), dtype=bool)
+            names = getattr(result, "names", None)
+            if names is None and dataset_config is not None:
+                names = dataset_config.get("names", {})
+            if gt is not None:
+                gt_union = gt.masks.any(axis=0) if len(gt.masks) else np.zeros_like(pred_union)
+                visuals["gt_masks"] = gt_union.astype(np.uint8) * 255
+            output_paths = {}
+            for directory, visual in (visuals if args.visual_style == "instance" else {}).items():
+                output_path = output_dir / directory / output_name
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                write_image(output_path, visual)
+                output_paths[directory] = str(output_path)
+            for variant, class_colors in (variants if args.visual_style == "instance" else {}).items():
+                visuals = {}
+                base = instance_visualization(
                     image,
                     visual_masks,
                     visual_classes,
                     visual_confidences,
-                    visual_boxes,
+                    empty_boxes,
                     names,
                     args.alpha,
                     args.line_width,
+                    class_colors,
                 )
-            else:
-                visual = overlay_visualization(
-                    image,
-                    visual_masks,
-                    visual_classes,
-                    visual_confidences,
-                    visual_boxes,
-                    gt.masks if gt else np.zeros((0, height, width), dtype=bool),
-                    visual_metrics,
-                    args.alpha,
-                    args.line_width,
-                )
-            # PNG preserves thin crack-mask boundaries better than lossy JPEG.
-            output_name = f"{index:06d}_{image_path.name}.png"
-            output_path = image_dir / output_name
-            write_image(output_path, visual)
-            row["visualization"] = str(output_path)
+                if gt is not None:
+                    errors = base.copy()
+                    white = instance_visualization(
+                        np.full_like(image, 255),
+                        visual_masks,
+                        visual_classes,
+                        visual_confidences,
+                        empty_boxes,
+                        names,
+                        1.0,
+                        args.line_width,
+                        class_colors,
+                    )
+                    white[~(pred_union & gt_union)] = 255
+                    for kind, region in {"FP": pred_union & ~gt_union, "FN": ~pred_union & gt_union}.items():
+                        color = tuple(bytes.fromhex(ERROR_COLORS[kind].lstrip("#")))[::-1]
+                        errors[region] = color
+                        white[region] = color
+                    visuals[str(Path("errors") / variant)] = errors
+                    visuals[str(Path("errors_white") / variant)] = white
+                if SAVE_MASK_OVERLAYS:
+                    visuals[str(Path("overlays") / variant)] = instance_visualization(
+                        base,
+                        empty_masks,
+                        visual_classes,
+                        visual_confidences,
+                        visual_boxes,
+                        names,
+                        1.0,
+                        args.line_width,
+                        class_colors,
+                    )
+                for directory, visual in visuals.items():
+                    output_path = output_dir / directory / output_name
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    write_image(output_path, visual)
+                    output_paths[Path(directory).as_posix()] = str(output_path)
+            visuals = {}
+            if args.visual_style == "diagnostic":
+                visuals = {
+                    "images": overlay_visualization(
+                        image,
+                        visual_masks,
+                        visual_classes,
+                        visual_confidences,
+                        visual_boxes,
+                        gt.masks if gt else np.zeros((0, height, width), dtype=bool),
+                        visual_metrics,
+                        args.alpha,
+                        args.line_width,
+                    )
+                }
+            for directory, visual in visuals.items():
+                output_path = output_dir / directory / output_name
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                write_image(output_path, visual)
+                output_paths[Path(directory).as_posix()] = str(output_path)
+            row["visualization"] = next(iter(output_paths.values()))
+            row["visualizations"] = json.dumps(output_paths, ensure_ascii=False)
+            row["prediction_mask"] = output_paths.get("masks", "")
+            row["error_image"] = next((path for key, path in output_paths.items() if key.startswith("errors/")), "")
+            row["error_white_image"] = next(
+                (path for key, path in output_paths.items() if key.startswith("errors_white/")), ""
+            )
         rows.append(row)
         if index == 1 or index % 25 == 0 or index == len(images):
             print(
@@ -964,13 +1066,38 @@ def process_source(
         raise RuntimeError("no image was processed successfully")
 
     per_image_fields = [
-        "index", "image", "image_path", "width", "height", "label_path", "label_found",
-        "malformed_label_lines", "num_gt", "num_pred", "num_pred_visual", "mean_confidence", "max_confidence",
-        "mask_ap50", "mask_map50_95", "pixel_iou", "pixel_dice", "pixel_precision",
-        "pixel_recall", "cldice", "pixel_tp", "pixel_fp", "pixel_fn", "inference_ms",
+        "index",
+        "image",
+        "image_path",
+        "width",
+        "height",
+        "label_path",
+        "label_found",
+        "malformed_label_lines",
+        "num_gt",
+        "num_pred",
+        "num_pred_visual",
+        "mean_confidence",
+        "max_confidence",
+        "mask_ap50",
+        "mask_map50_95",
+        "pixel_iou",
+        "pixel_dice",
+        "pixel_precision",
+        "pixel_recall",
+        "cldice",
+        "pixel_tp",
+        "pixel_fp",
+        "pixel_fn",
+        "inference_ms",
         "visualization",
+        "visualizations",
+        "prediction_mask",
+        "error_image",
+        "error_white_image",
     ]
-    per_image_csv = output_dir / "per_image_metrics.csv"
+    metrics_dir = output_dir / "resume_metrics" / str(time.time_ns()) if skipped else output_dir
+    per_image_csv = metrics_dir / "per_image_metrics.csv"
     write_csv(per_image_csv, rows, per_image_fields)
 
     elapsed = time.perf_counter() - started
@@ -984,6 +1111,10 @@ def process_source(
         "visual_and_pixel_conf": args.visual_conf,
         "seed_note": "metrics are deterministic for fixed weights/input settings",
         "images": len(rows),
+        "num_input_images": len(images),
+        "num_skipped_images": skipped,
+        "batch_size": args.batch,
+        "gt_dir": str(GT_DIR) if GT_DIR is not None else "",
         "images_with_labels": sum(bool(row.get("label_found")) for row in rows),
         "images_with_gt": sum(int(row.get("num_gt", 0) or 0) > 0 for row in rows),
         "missing_label_files": sum(not bool(row.get("label_found")) for row in rows) if dataset_mode else "",
@@ -992,7 +1123,7 @@ def process_source(
         "mean_inference_ms": nanmean(rows, "inference_ms"),
         "wall_time_seconds": elapsed,
     }
-    if dataset_mode:
+    if any(row.get("label_found") for row in rows):
         dataset_ap50, dataset_map, details = accumulator.compute()
         both_empty = global_tp + global_fp + global_fn == 0
         positive_rows = [row for row in rows if int(row.get("num_gt", 0) or 0) > 0]
@@ -1013,20 +1144,20 @@ def process_source(
                 **details,
             }
         )
-        if summary["images_with_labels"] == 0:
-            print(
-                "Warning: no label TXT was found. Check dataset path/images/labels layout before trusting metrics.",
-                file=sys.stderr,
-            )
-    summary_csv = output_dir / "summary_metrics.csv"
+    if dataset_mode and not summary["images_with_labels"]:
+        print(
+            "Warning: no label TXT was found. Check dataset path/images/labels layout before trusting metrics.",
+            file=sys.stderr,
+        )
+    summary_csv = metrics_dir / "summary_metrics.csv"
     write_csv(summary_csv, [summary], list(summary.keys()))
     if args.save_json:
-        with (output_dir / "summary_metrics.json").open("w", encoding="utf-8") as stream:
+        with (metrics_dir / "summary_metrics.json").open("w", encoding="utf-8") as stream:
             json.dump({key: finite_or_blank(value) for key, value in summary.items()}, stream, indent=2, ensure_ascii=False)
 
     print(f"Per-image CSV: {per_image_csv}")
     print(f"Summary CSV:   {summary_csv}")
-    if dataset_mode:
+    if summary["images_with_labels"]:
         print(f"Mask mAP50:    {summary['dataset_mask_map50']:.4f}")
         print(f"Mask mAP50-95: {summary['dataset_mask_map50_95']:.4f}")
         print(f"Macro clDice:  {summary['macro_cldice']:.4f}")
@@ -1040,8 +1171,11 @@ def available_dataset_splits(dataset_yaml: Path) -> List[str]:
     return [name for name in ("train", "val", "test") if data.get(name) not in (None, "", [])]
 
 
-def main() -> int:
-    args = parse_args()
+def main(args: argparse.Namespace) -> int:
+    if args.batch < 1:
+        raise ValueError("--batch must be at least 1")
+    if not 0.0 <= args.alpha <= 1.0:
+        raise ValueError("--alpha must be within [0, 1]")
     previous_cuda_visible = prepare_device_environment(args.device)
     if cv2 is None:
         raise ModuleNotFoundError(
@@ -1063,6 +1197,8 @@ def main() -> int:
 
     if dataset_mode:
         splits = available_dataset_splits(source)
+        if SPLIT != "all":
+            splits = [SPLIT] if SPLIT in splits else []
         if not splits:
             raise ValueError(f"dataset YAML has no usable train/val/test entry: {source}")
         print(f"Dataset splits: {', '.join(splits)}")
@@ -1092,4 +1228,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(parse_args(sys.argv[1:])))
