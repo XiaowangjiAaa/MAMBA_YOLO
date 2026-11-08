@@ -34,6 +34,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -58,6 +59,28 @@ GT_DIR = None  # 显式 GT 目录：同名 YOLO 分割 TXT 或黑底非零前景
 SAVE_MASK_OVERLAYS = True
 SKIP_EXISTING = False
 SPLIT = "all"
+PROGRESS = {"total": 0, "done": 0, "processed": 0, "skipped": 0, "started": time.perf_counter()}
+
+
+def log_progress(message: str) -> None:
+    """Print a flushed stage message with shared batch-run progress and elapsed time."""
+    elapsed = time.perf_counter() - PROGRESS["started"]
+    prefix = f"[{time.strftime('%H:%M:%S')}]"
+    if PROGRESS["total"]:
+        remaining = PROGRESS["total"] - PROGRESS["done"]
+        eta = (
+            str(timedelta(seconds=round(elapsed / PROGRESS["processed"] * remaining)))
+            if PROGRESS["processed"]
+            else "待估算"
+        )
+        if not remaining:
+            eta = "0:00:00"
+        prefix += (
+            f" [总进度 {PROGRESS['done']}/{PROGRESS['total']} {PROGRESS['done'] / PROGRESS['total']:.1%}"
+            f" | 新处理 {PROGRESS['processed']} | 跳过 {PROGRESS['skipped']}"
+            f" | 已用 {timedelta(seconds=round(elapsed))} | 预计剩余 {eta}]"
+        )
+    print(f"{prefix} {message}", flush=True)
 
 
 @dataclass
@@ -815,6 +838,7 @@ def process_source(
 ) -> None:
     """Process one dataset split, or one ordinary image source."""
     source = source.expanduser()
+    log_progress(f"扫描输入，split={split or '文件夹'}：{source}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_mode = is_dataset_yaml(source)
@@ -824,6 +848,7 @@ def process_source(
         images = images[: args.max_images]
     if not images:
         raise FileNotFoundError(f"no supported images resolved from: {source}")
+    log_progress(f"找到 {len(images)} 张图片；检查 GT 和已生成结果：{output_dir}")
 
     variants = COLOR_VARIANTS or {"": CLASS_COLORS}
     gt_index = None
@@ -857,12 +882,14 @@ def process_source(
             directories = [Path("images")]
         expected = [output_dir / directory / f"{index:06d}_{image_path.name}.png" for directory in directories]
         if SKIP_EXISTING and not args.no_images and all(path.is_file() and path.stat().st_size for path in expected):
-            print(f"[{index}/{len(images)}] complete, skipped: {image_path.name}")
+            PROGRESS["done"] += 1
+            PROGRESS["skipped"] += 1
+            log_progress(f"[{index}/{len(images)}] 结果完整，跳过：{image_path.name}")
             continue
         pending[image_path] = index
     skipped = len(images) - len(pending)
     if not pending:
-        print(f"All {skipped} images already generated; existing CSV files retained.")
+        log_progress(f"本组 {skipped} 张均已生成，保留已有 CSV。")
         return
 
     print(f"Source:  {source.resolve()}")
@@ -900,12 +927,17 @@ def process_source(
         save=False,
     )
     results = model.predict(**predict_kwargs)
+    log_progress(
+        f"准备推理 {len(pending)} 张，跳过 {skipped} 张；batch={args.batch}, imgsz={args.imgsz}, "
+        f"conf={args.conf}, visual_conf={args.visual_conf}, device={args.device}"
+    )
     rows: List[dict] = []
     accumulator = DatasetAPAccumulator()
     global_tp = global_fp = global_fn = 0
     started = time.perf_counter()
 
     for result in results:
+        image_started = time.perf_counter()
         image_path = Path(result.path).expanduser().resolve()
         index = pending[image_path]
         original = getattr(result, "orig_img", None)
@@ -924,9 +956,14 @@ def process_source(
         visual_boxes = boxes[visual_select]
         speed = getattr(result, "speed", {}) or {}
         inference_ms = float(speed.get("inference", math.nan))
+        log_progress(
+            f"[{index}/{len(images)}] {image_path.name} 推理完成：{width}×{height}，"
+            f"候选 {len(pred_masks)}，显示 {len(visual_masks)}，推理 {inference_ms:.1f} ms；开始读取 GT"
+        )
         gt = load_yolo_segmentation_gt(image_path, height, width, dataset_root, label_path=label_paths[image_path])
         if gt.label_path is None:
             gt = None
+        log_progress(f"GT：{gt.label_path if gt else '未匹配，仅保存预测结果'}")
 
         row = {
             "index": index,
@@ -946,6 +983,7 @@ def process_source(
         }
         visual_metrics = None
         if gt is not None:
+            log_progress(f"[{index}/{len(images)}] {image_path.name} 计算 GT 对比指标")
             pixel = union_metrics(visual_masks, gt.masks)
             row.update(pixel)
             visual_metrics = row
@@ -961,6 +999,7 @@ def process_source(
                 accumulator.update(pred_classes, confidences, gt.classes, matches)
 
         if not args.no_images:
+            log_progress(f"[{index}/{len(images)}] {image_path.name} 开始绘图及保存，配色数量={len(variants)}")
             pred_union = visual_masks.any(axis=0) if len(visual_masks) else np.zeros((height, width), dtype=bool)
             output_name = f"{index:06d}_{image_path.name}.png"
             visuals = {"masks": pred_union.astype(np.uint8) * 255}
@@ -978,7 +1017,12 @@ def process_source(
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 write_image(output_path, visual)
                 output_paths[directory] = str(output_path)
-            for variant, class_colors in (variants if args.visual_style == "instance" else {}).items():
+            for variant_index, (variant, class_colors) in enumerate(
+                (variants if args.visual_style == "instance" else {}).items(), start=1
+            ):
+                log_progress(
+                    f"[{index}/{len(images)}] 保存配色 {variant_index}/{len(variants)}：{variant or 'default'}"
+                )
                 visuals = {}
                 base = instance_visualization(
                     image,
@@ -1056,11 +1100,12 @@ def process_source(
                 (path for key, path in output_paths.items() if key.startswith("errors_white/")), ""
             )
         rows.append(row)
-        if index == 1 or index % 25 == 0 or index == len(images):
-            print(
-                f"[{index}/{len(images)}] {image_path.name}: "
-                f"pred_ap={len(pred_masks)}, pred_visual={len(visual_masks)}"
-            )
+        PROGRESS["done"] += 1
+        PROGRESS["processed"] += 1
+        log_progress(
+            f"[{index}/{len(images)}] 完成 {image_path.name}；保存 {len(output_paths) if not args.no_images else 0} 张图，"
+            f"后处理/指标/绘图耗时 {time.perf_counter() - image_started:.2f}s"
+        )
 
     if not rows:
         raise RuntimeError("no image was processed successfully")
@@ -1097,6 +1142,7 @@ def process_source(
         "error_white_image",
     ]
     metrics_dir = output_dir / "resume_metrics" / str(time.time_ns()) if skipped else output_dir
+    log_progress(f"本组图片处理结束，写入 {len(rows)} 张图片的 CSV：{metrics_dir}")
     per_image_csv = metrics_dir / "per_image_metrics.csv"
     write_csv(per_image_csv, rows, per_image_fields)
 
@@ -1206,7 +1252,22 @@ def main(args: argparse.Namespace) -> int:
         splits = [None]
 
     # Load the network once, then reuse it for train/val/test.
+    log_progress(f"加载权重：{weights}；架构：{model_yaml or 'checkpoint 自带架构'}")
+    load_started = time.perf_counter()
     model, load_description = load_model(weights, model_yaml)
+    log_progress(f"模型加载完成，耗时 {time.perf_counter() - load_started:.2f}s；{load_description}")
+    model.add_callback("on_predict_start", lambda predictor: log_progress("模型预热完成，开始预测"))
+    model.add_callback(
+        "on_predict_batch_start",
+        lambda predictor: log_progress(
+            f"开始推理及掩膜解码，批次 {len(predictor.batch[0])} 张："
+            + ", ".join(Path(path).name for path in predictor.batch[0])
+        ),
+    )
+    model.add_callback(
+        "on_predict_postprocess_end",
+        lambda predictor: log_progress(f"批次推理及掩膜解码完成，{len(predictor.results)} 张；准备逐图绘制"),
+    )
     for split in splits:
         split_output_dir = base_output_dir / split if split else base_output_dir
         if split:
