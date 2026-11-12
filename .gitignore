@@ -11,7 +11,12 @@ feature_visualization/
 feature_comparison/
 tmp/
 
-# Generated model/export artifacts. Existing explicitly tracked weights remain tracked.
+# Local datasets and generated caches
+/crack-seg/
+*.cache
+
+# Model weights and generated export artifacts
+*.pt
 *.pth
 *.onnx
 *.engine
