@@ -8,6 +8,44 @@ Crack instance-segmentation research fork based on **Mamba-YOLO** and a YOLO11 s
 
 Training outputs and checkpoints under `output_dir/` are intentionally excluded from version control.
 
+## Linux 一键安装环境
+
+Linux / NVIDIA GPU 用户可使用 [setup_env.sh](setup_env.sh)。请先安装 Conda、NVIDIA 驱动、CUDA Toolkit（含 `nvcc`）以及与 Toolkit 兼容的 GCC / G++。脚本不会使用 `sudo` 安装系统组件，也不会下载数据集或权重。
+
+```bash
+git clone https://github.com/XiaowangjiAaa/MAMBA_YOLO.git
+cd MAMBA_YOLO
+bash setup_env.sh
+```
+
+默认创建或复用 `mambayolo` 环境（Python `3.11`），安装 PyTorch `2.3.0` / torchvision `0.18.0` / torchaudio `2.3.0` 的 `cu121` wheel、项目依赖和当前仓库，编译 `selective_scan_cuda_core`，最后执行导入和 GPU 前向检查。已有环境的 Python 版本必须为 `3.11`；已有 core 扩展可导入时默认跳过编译。安装日志写入 `setup_env_<时间戳>.log`。editable 打包失败时会回退为 `.pth` 注册仓库路径。
+
+```bash
+# 查看参数，不执行安装
+bash setup_env.sh --help
+
+# 使用清华 PyPI 镜像，降低编译并行数
+bash setup_env.sh --china-mirror --max-jobs 2
+
+# 指定环境和本机实际 CUDA Toolkit 路径
+bash setup_env.sh --env-name mambayolo --cuda-home /usr/local/cuda-12.1
+
+# 指定 Conda 可执行文件；也支持 --cuda-tag cu118
+bash setup_env.sh --conda-exe "$HOME/miniconda3/bin/conda"
+```
+
+`--full-selective-scan` 编译 core、ndstate、oflex 全部模块；默认只编译项目使用的 core。`--skip-verify` 跳过最终导入和前向检查，GPU 可用性仍是安装的必要条件。若 CUDA 扩展编译失败，请检查日志中的 CUDA Toolkit、PyTorch CUDA 和 GCC / G++ 兼容性。
+
+安装后，自行准备分割数据集 YAML 并运行：
+
+```bash
+conda activate mambayolo
+python batch_finetune.py --data /path/to/data.yaml --dry-run
+python batch_finetune.py --data /path/to/data.yaml
+```
+
+当前 `batch_finetune.py` 从 YAML 随机初始化模型，使用 `pretrained=False`、`resume=False`，从头训练。
+
 ## Windows 一键安装环境
 
 本仓库提供 [setup_env.ps1](setup_env.ps1)，用于自动创建或复用 Conda 环境、安装 Python 依赖、编译 CUDA 扩展并执行环境自检。
