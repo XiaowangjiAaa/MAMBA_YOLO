@@ -1,0 +1,168 @@
+Use case: scientific-educational
+Asset type: publication-ready neural-network architecture overview for a computer-vision paper
+Figure title: "CrackPath Mamba-YOLO"
+Figure subtitle: "Structure-aware state propagation and cross-scale fusion for crack instance segmentation"
+
+SCIENTIFIC PURPOSE AND CENTRAL CLAIM
+
+Create one polished scientific architecture figure for the current CrackPath Mamba-YOLO design. The central scientific sentence is: crack structure controls both within-scale state propagation and cross-scale feature propagation. The complete model is based on the YOLO11 instance-segmentation architecture, but its backbone feature-extraction blocks are replaced by Crack Path State Blocks, abbreviated CPSB, and its conventional PAN-FPN feature-fusion path is replaced by a Crack-Structure Fusion Neck, abbreviated CSF-Neck. The official YOLO11 SPPF and C2PSA remain at the deepest backbone stage. The final YOLO11 segmentation head receives three fused scales and produces instance masks and bounding boxes. The reader must understand, without relying on the title, that CPSB handles crack-aligned scanning and memory management inside each scale, while CSF-Neck carries the same crack-structure evidence across scales. These are not two unrelated modules; they are two propagation levels governed by the same structural representation.
+
+The first-glance reading path must be left-to-right: a pavement crack image enters the CPSB backbone, multi-scale P3/P4/P5 features enter the visually dominant CSF-Neck, the fused P3'/P4'/P5' features enter the YOLO11 segmentation head, and an output pavement image shows a plausible instance mask and bounding box. At working reading distance, the reader should see the four backbone CPSB stages, the retained SPPF and C2PSA, the three backbone feature taps B3/B4/B5, two top-down CSF operations, two bottom-up CSF operations, and the three outputs consumed by the segmentation head. At close inspection, the reader should recover that each CSF operation aligns a source scale, estimates cross-scale agreement using crack probability p, local orientation o and connectivity c, gates the source residual, and preserves the target feature identity through residual fusion.
+
+This is an architecture overview, not an ablation-result figure and not a training-loss diagram. Do not add performance numbers, datasets, loss functions, training arrows, optimizer settings, equations occupying large panels, or experimental charts. Do not present generated thumbnails as measured evidence. The input and output road images are illustrative atomic fields; they establish task context only. The figure should remain self-contained as a method overview and should not require a separate legend to understand the principal data path.
+
+REFERENCE IMAGE ROLE AND AUTHORIZED ADAPTATION
+
+Use the attached user-supplied schematic only as a composition and visual-language reference. Preserve its recognizable organization: Input near the upper left, Output near the upper right, the model name centered near the top, and three grouped architectural regions below for Backbone, Neck and Head. Preserve the friendly restrained scientific style with rounded grouping boundaries, pastel module fills, dark navy outlines, short labels and clear connectors. Improve the proportions, alignment, typography and connector routing so the result looks suitable for a journal paper rather than a rough PPT sketch. Do not copy the old Neck topology or its old labels. In particular, do not show generic Concat nodes, generic C3k2 nodes, or CPSB blocks inside the Neck. Replace that old content with the actual CSF-Neck described below. Do not imply that CSF-Neck replaces C2PSA. The C2PSA block must remain visibly inside the Backbone after SPPF.
+
+The reference image's road-crack thumbnails may guide the task context, but generate a new neutral illustrative pavement image rather than reproducing a specific photograph. The output thumbnail must show the same apparent pavement sample and crop as the input, with a thin blue or cyan instance mask overlay following the crack and one restrained bounding box. The output is an illustration of instance segmentation, not claimed experimental evidence. Keep the input and output image frames equal in size and aligned on the same top baseline.
+
+CANVAS, PUBLICATION SIZE AND GLOBAL COMPOSITION
+
+Use a clean landscape canvas with a width-to-height ratio close to 1.65:1, suitable for a two-column paper figure at approximately 178 mm final width. Render at high resolution, ideally near 2400 by 1450 pixels or an equivalent high-resolution landscape size. Use a white or very pale warm-gray background with no texture, no gradient, no glossy effect and no shadow-heavy UI styling. Maintain narrow deliberate exterior margins, approximately four percent of canvas width, and a clear top band occupying about eighteen percent of the height for the input, model title and output. The lower architecture band occupies the remaining height.
+
+Divide the lower band into three unequal scientific regions: Backbone approximately thirty percent of the usable width, CSF-Neck approximately forty-five percent, and Head approximately twenty-five percent. The CSF-Neck is the focal region and should receive the greatest horizontal space and the strongest local visual organization. Use one subtle rounded dashed enclosure around each major region, matching the visual family of the supplied reference. The enclosures express real scopes, not decorative cards. Keep sufficient gutters between regions for visible feature-tap arrows and head-input arrows. Do not place every small operation in a separate large card. Small operators should be compact, while feature maps should be depicted as thin stacked planes or labeled ports so operators and representations have visibly different roles.
+
+Place the title "CrackPath Mamba-YOLO" centered in the top band. Place the subtitle immediately below in smaller regular text. The input image occupies the top-left corner above the Backbone; the output image occupies the top-right corner above the Head. A clear downward arrow connects Input to the first backbone convolution. A clear upward or diagonal arrow connects the Segmentation Head to Output. The architecture itself should form a continuous left-to-right scientific spine even though the Backbone is drawn vertically.
+
+BACKBONE REGION: EXACT TOPOLOGY
+
+Label the left grouped region "CPSB Backbone". Inside it, draw a compact vertical hierarchy consistent with YOLO11 downsampling. The visible sequence from top to bottom is:
+
+1. a small blue rounded operator labeled "Conv /2";
+2. a second small blue rounded operator labeled "Conv /2";
+3. a green rounded operator labeled "CPSB  P2";
+4. a small blue rounded operator labeled "Conv /2";
+5. a green rounded operator labeled "CPSB  P3";
+6. a small blue rounded operator labeled "Conv /2";
+7. a green rounded operator labeled "CPSB  P4";
+8. a small blue rounded operator labeled "Conv /2";
+9. a green rounded operator labeled "CPSB  P5";
+10. a compact blue operator labeled "SPPF";
+11. a compact lavender-blue operator labeled "C2PSA".
+
+Connect these operators with one centered downward solid arrow path. The four CPSB blocks replace the corresponding YOLO11 backbone C3k2 feature-extraction stages at P2, P3, P4 and P5. Do not print "C3k2" inside the diagram. The first two convolutions form the stem and the later stride-two convolutions downsample between stages. Keep the four CPSB blocks visually consistent and slightly wider than the Conv boxes so their repeated importance is visible. P2 is an internal shallow feature stage; expose only P3, P4 and the post-C2PSA deepest feature as Neck inputs.
+
+From the right edge of CPSB P3, draw a short feature port labeled "B3  (1/8)". From the right edge of CPSB P4, draw a second feature port labeled "B4  (1/16)". From the right edge of C2PSA, draw a third port labeled "B5  (1/32)". Use three thin stacked feature-plane glyphs rather than operator boxes. Route these three representations into the CSF-Neck at their corresponding vertical levels. B3 should enter the upper-detail level, B4 the middle level, and B5 the deep-semantic level. Do not tap B5 before SPPF or before C2PSA; the deepest source is the output of the retained SPPF and official C2PSA sequence.
+
+Add one small mechanism inset or badge near the largest CPSB block, but keep it subordinate to the complete architecture. The inset should visually summarize CPSB with a compact chain: a small crack-response map labeled "p", a two-component direction cue labeled "o", a four-neighbor connectivity cue labeled "c", a curved token path following a thin crack-like trace labeled "Adaptive path scan", and a small state ribbon labeled "Crack-aware memory". Use arrows showing p, o and c guide both the scan path and memory update. Do not draw a conventional fixed horizontal, vertical or diagonal scan as the proposed path. Do not imply the path is derived from ground truth at inference. The cue maps are predicted from the current feature. Keep this inset graphical; avoid paragraphs. The inset explains that CPSB performs within-scale structure-aware state propagation.
+
+CSF-NECK REGION: PURPOSE AND GLOBAL TOPOLOGY
+
+Label the central grouped region "CSF-Neck" and add a smaller line beneath the header reading "cross-scale structure-consistent fusion". The region must clearly replace the entire conventional YOLO11 PAN-FPN fusion chain, not merely one attention block. Do not draw Concat as the principal fusion operation and do not place CPSB inside this region. The four principal fusion operators are all CSF units. Arrange them as a bidirectional feature pyramid with two top-down operations followed by two bottom-up operations.
+
+Use three horizontal scale lanes aligned with the incoming B3, B4 and B5 representations. Label the lanes quietly at the left edge of the Neck: "P3 detail", "P4 structure" and "P5 semantics". The P3 lane sits highest, P4 in the middle and P5 lowest. The lane geometry makes feature resolution visible: P3 feature planes are wider, P4 medium width and P5 narrower. The data-flow direction through fusion remains toward the Head on the right.
+
+TOP-DOWN PATH
+
+Start with B5 at the lowest lane. Pass B5 through a compact blue alignment operator labeled "Up + Align" and route it upward to the P4 lane. At the P4 lane, merge the aligned semantic source with target feature B4 through a prominent teal-green operator labeled "CSF-TD4". The operator has two explicit input ports: a target port from B4 and a source port from aligned B5. The target route should enter straight from the left, while the semantic source enters from below after upsampling. The output is a feature representation labeled "T4".
+
+Then route T4 through a second compact blue operator labeled "Up + Align" toward the P3 lane. At the P3 lane, fuse aligned T4 with target B3 through another prominent teal-green operator labeled "CSF-TD3". Again show two explicit input ports, with B3 as the identity-preserving target and aligned T4 as the gated source. The output is labeled "T3 = P3'". Add the short annotation "semantic injection" beside the top-down arrows, not inside every operator. This top-down branch transfers deep crack semantics into fine-resolution features, but only where cross-scale structural evidence agrees.
+
+BOTTOM-UP PATH
+
+From T3, route a branch through a compact blue operator labeled "Down + Align" to the P4 lane. Fuse this aligned detail source with target T4 through a third prominent teal-green operator labeled "CSF-BU4". Show T4 continuing straight as the target identity path and the downsampled T3 entering from above as the gated source. Label the output "N4 = P4'". Then route N4 through a second compact blue operator labeled "Down + Align" to the P5 lane. Fuse this aligned source with the original deep target B5 through a fourth prominent teal-green operator labeled "CSF-BU5". Label its output "N5 = P5'". Add the short annotation "detail reinforcement" beside the bottom-up arrows. This bottom-up branch returns fine crack boundaries and continuity evidence toward deeper semantic features without flooding them with irrelevant background texture.
+
+Make the three final Neck outputs P3', P4' and P5' visually clear and vertically aligned near the right boundary of the Neck. These are feature representations, so draw them as small stacked planes with different spatial sizes, not as operator boxes. Solid arrows from these three representations enter three distinct ports on the YOLO11 Segmentation Head. No output should bypass the CSF operations. P3' comes from T3, P4' from N4 and P5' from N5.
+
+EXPANDED CSF OPERATION
+
+Inside the central region, reserve a compact but readable focal inset for one representative CSF operation. This inset should be visually linked to CSF-TD4 by a light association line without a directed data arrow. Draw the target feature T as a stack entering a straight residual identity route. Draw the source feature S entering an "Align" operator to become S_a. Above or beside them, depict three small structure fields predicted from each feature: crack probability p as a thin bright line on a dark mini-grid, orientation o as sparse short line segments, and connectivity c as four-neighbor links. Pair the target and aligned-source fields, then feed them to a compact diamond or circular operator labeled "Agreement". The agreement output forms a gate G represented by a narrow heat strip. The aligned source residual passes through this gate, then through a small scale marker gamma, and joins the target route at an addition junction. The output is Y.
+
+Place one concise equation beneath the inset only if it remains legible: "Y = T + γ · G · Rₛ". Use proper gamma and a subscript s. Add a small note "γ: small / zero initialized". This equation expresses target-preserving gated residual source injection. Do not print a full page of equations. Do not depict raw concatenation as the central CSF mechanism. The target identity route must remain continuous and visually primary; the source injection route is secondary and gated. Use an addition symbol at the exact junction.
+
+Show the structure agreement as involving all three cues p, o and c. The probability cue answers whether both scales respond to a crack at the aligned location. The orientation cue answers whether their local crack directions agree. The connectivity cue answers whether their local continuation patterns agree. These explanatory meanings should be carried by the tiny visual fields and three one- or two-word labels: "probability", "orientation", "connectivity". Do not add long prose inside the figure. Make it visually explicit that the same structural vocabulary p, o and c appears in both the CPSB inset and CSF inset. A subtle shared-color bracket or repeated small p/o/c symbols may establish this relation. Do not draw a false tensor arrow that suggests the exact same tensor is simply copied unchanged across all stages; the relation is shared structural representation and guidance logic.
+
+HEAD REGION AND OUTPUT
+
+Label the right grouped region "Head". Inside it, draw one tall restrained pink rounded block labeled on three centered lines: "YOLO11", "Segmentation Head", and "Detect + Proto + Mask". The three Neck output features P3', P4' and P5' must enter three separate positions on the left edge of this block. The Head is a standard downstream component and should be visually simpler than the CSF-Neck. Do not expand its internal convolutions. From the head, route one clear arrow upward to the Output image. Near that arrow, use the compact label "instances".
+
+The Output image should depict the same pavement crop as the Input, with a semi-transparent cyan or blue mask following the visible crack, a thin blue bounding rectangle around the crack instance, and a tiny confidence label if space permits. Do not show multiple unrelated boxes. Do not hallucinate a different road scene. The overlay must be visually plausible and modest, similar to a normal YOLO instance-segmentation rendering. Since this is illustrative, do not add a numeric metric or claim that the output came from a particular checkpoint.
+
+VISUAL ROLE GRAMMAR
+
+Use distinct visual carriers for different scientific roles. Operators are compact rounded rectangles. Feature representations are thin stacked planes or short labeled ports. Structure fields are small grids, vector cues or neighbor-link glyphs. Addition is a circular junction with a plus sign. Scope is indicated by the three large dashed rounded enclosures. The input and output are atomic image fields with restrained solid frames. Association from a main CSF block to its inset uses a light dotted leader with no arrowhead. Primary tensor flow uses solid dark-navy arrows with clear arrowheads. Secondary alignment routes use slightly thinner teal arrows. No line may pass through text or another operator.
+
+Use a restrained semantic palette with stable meaning: blue fill for standard YOLO operators such as Conv, SPPF and Align; green fill for CPSB within-scale propagation; teal or turquoise fill for CSF cross-scale fusion; lavender-blue fill for the official C2PSA; soft pink for the standard YOLO11 Segmentation Head; dark navy for outlines and main text. Use pale versions for fills and deeper versions for borders. The strongest saturation belongs to the CSF focal mechanism and the repeated p/o/c guidance cues. Ensure grayscale readability through enclosure, line weight, operator shape and route geometry rather than hue alone.
+
+Typography should be a clean modern sans-serif such as Arial, Helvetica or an equivalent publication-safe family. Use at most three functional type sizes: title, region headers, and operator/annotation labels. At the intended 178 mm print width, ordinary labels should remain approximately eight-point equivalent or larger, and secondary annotations approximately seven-point equivalent or larger. Use semibold for the model title and region headers; use regular or medium weight for all technical labels. Avoid all-caps headers. Spell every acronym exactly: CPSB, CSF-Neck, SPPF, C2PSA, YOLO11, P3, P4 and P5. Do not distort or substitute these strings.
+
+VISIBLE TEXT LIST
+
+Only the following scientific labels should appear, plus very small P-level and structure-cue labels already specified. Preserve spelling and capitalization exactly:
+
+"Input"
+"CrackPath Mamba-YOLO"
+"Structure-aware state propagation and cross-scale fusion for crack instance segmentation"
+"Output"
+"CPSB Backbone"
+"Conv /2"
+"CPSB  P2"
+"CPSB  P3"
+"CPSB  P4"
+"CPSB  P5"
+"SPPF"
+"C2PSA"
+"B3  (1/8)"
+"B4  (1/16)"
+"B5  (1/32)"
+"Adaptive path scan"
+"Crack-aware memory"
+"CSF-Neck"
+"cross-scale structure-consistent fusion"
+"P3 detail"
+"P4 structure"
+"P5 semantics"
+"Up + Align"
+"Down + Align"
+"CSF-TD4"
+"CSF-TD3"
+"CSF-BU4"
+"CSF-BU5"
+"semantic injection"
+"detail reinforcement"
+"T4"
+"T3 = P3'"
+"N4 = P4'"
+"N5 = P5'"
+"probability"
+"orientation"
+"connectivity"
+"Agreement"
+"Y = T + γ · G · Rₛ"
+"γ: small / zero initialized"
+"Head"
+"YOLO11"
+"Segmentation Head"
+"Detect + Proto + Mask"
+"instances"
+
+Use p, o and c as compact mathematical cue symbols in both the CPSB and CSF insets. Use T, S, S_a, G, gamma, R_s and Y only within the CSF inset. Do not add production instructions, explanatory paragraphs, file names, dates, dataset names, figure numbers, metric values, watermarks, logos or citations inside the artwork.
+
+CONNECTOR CONTRACT AND ROUTING
+
+Every arrow must have an exact source and target. The main flow is Input to Conv, vertically through the backbone, from B3/B4/B5 into the CSF-Neck, through the top-down and bottom-up fusions, from P3'/P4'/P5' into the Segmentation Head, and from the Head to Output. The top-down semantic route is B5 to Up+Align to CSF-TD4, yielding T4; T4 to Up+Align to CSF-TD3, yielding T3. The bottom-up detail route is T3 to Down+Align to CSF-BU4 with T4, yielding N4; N4 to Down+Align to CSF-BU5 with B5, yielding N5. Maintain the direct target identity path through each CSF unit. Use branch dots only when one representation truly feeds two destinations, for example T4 feeding both CSF-TD3 and CSF-BU4, or B5 feeding both CSF-TD4 and CSF-BU5. Incidental line crossings must not receive a dot.
+
+Reserve a clear route lane between Backbone and Neck for the B3/B4/B5 taps. Keep each arrow short and primarily orthogonal or smoothly bent, with no long decorative loops. In the Neck, the bidirectional pyramid may use gentle diagonal transitions between adjacent scale lanes, but arrowheads must remain unambiguous. Keep enough clearance between arrowheads and box borders. The three head inputs should remain separated. The light association leader from CSF-TD4 to the expanded CSF inset must not be mistaken for tensor flow.
+
+SCIENTIFIC BOUNDARIES AND FORBIDDEN READINGS
+
+Prevent these incorrect interpretations. Do not show CSF-Neck only at the original C2PSA position. Do not remove SPPF or C2PSA from the Backbone. Do not show the Neck as a list of Concat, Conv and CPSB boxes copied from the earlier reference. Do not show CPSB as a fixed H/V/diagonal direction-weighting unit; its proposed scan follows selectively constructed local crack paths using predicted p/o/c cues. Do not suggest that the path is derived from ground truth at inference. Do not show a separate unrelated attention mechanism controlling CSF. Do not turn CSF into another Mamba scan; CSF is an efficient gated cross-scale fusion mechanism. Do not claim C2PSA is an innovation of this work; it is retained official YOLO11 context processing.
+
+Do not visually imply that every backbone scale has identical computational cost. The repeated CPSB glyphs communicate a shared module family, not equal tensor size. Do not imply the p/o/c fields are exact copies across scales. They are scale-specific predicted structural representations compared after alignment. Do not depict gamma as a fixed large amplification. Its small or zero initialization makes the new source-injection branch start near identity for stable optimization. Do not show raw addition before the agreement gate. The source residual is aligned, structurally gated and scaled before addition to the target.
+
+Do not make the figure look like a software dashboard, web interface, product card grid or colorful marketing poster. Avoid excessive drop shadows, neon colors, glassmorphism, bevels, 3D perspective, decorative icons, circuit-board backgrounds and unrelated scientific symbols. Avoid paper texture and global hand-drawn jitter. The supplied reference has slightly informal rounded forms, but the new rendering should use crisp geometry and professional alignment.
+
+LOCAL DETAIL, DENSITY AND FIT
+
+The meaningful content should confidently fill the canvas while retaining functional whitespace. The Backbone should be compact but readable; the Neck should not look empty. Enlarge the bidirectional pyramid and representative CSF inset before adding any extra annotation. The Head should be simple and stable. The title must not be the largest visual mass; the CSF-Neck topology should remain the focal zone when the title is hidden. The input and output thumbnails should support the story without dominating the architecture.
+
+At thumbnail size, the reader should see a green repeated backbone family, a wide teal bidirectional fusion center, and a pink segmentation head. At normal reading size, the reader should trace the three scales and four CSF operations. At close reading, the p/o/c agreement and gated residual equation should be recoverable. If all details do not fit, prioritize exact topology and legible operator names over decorative thumbnails or extra prose. Never solve crowding by reducing every label to tiny text.
+
+Use aligned baselines and consistent corner radii. The four CPSB blocks share one size. The four CSF blocks share another slightly more prominent size. Alignment operators are smaller than CSF blocks. Feature-plane glyphs use consistent perspective and spacing. The dashed outer enclosures have the same dash pattern and outline weight. Do not let any label touch a border. Avoid orphan text below modules.
+
+OUTPUT QUALITY AND FINAL CHECKS
+
+Render one complete high-resolution visual draft. Verify that the title is spelled correctly, that the Neck header reads CSF-Neck, that the Backbone ends with SPPF then C2PSA, and that no generic Concat or Neck CPSB appears. Verify all four CSF operations and all three outputs are present. Verify B3, B4 and B5 connect from the correct Backbone levels. Verify the Head has three inputs. Verify p, o and c are visually shared between the CPSB and CSF explanations. Verify the equation uses a target-preserving residual form. Verify the output image contains both mask and bounding box. Verify arrows do not cross labels.
+
+The final appearance should be a clean, modern, publication-oriented scientific neural-network diagram: visually related to the user's supplied architecture sketch, but clearer, wider, more structured and scientifically accurate for the current design. No watermark. No decorative border around the entire canvas beyond the three meaningful scope enclosures. No incomplete placeholders. No duplicated modules. No extra claims.

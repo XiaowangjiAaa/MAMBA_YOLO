@@ -42,12 +42,21 @@ def parse_args():
     p.add_argument('--qualitative-scanning', action='store_true',
                    help='Create a paper-style Input/GT/Raster/Cross/... error-mask grid with identical ROIs')
     p.add_argument('--qualitative-only', action='store_true',
-                   help='Skip feature/path exports and generate only predictions, metrics and the qualitative scanning figure')
+                   help='Skip standard feature/path panels; keep requested qualitative and/or scan-influence figures')
     p.add_argument('--qualitative-cases', type=Path,
                    help='Optional JSON list: [{"label":"Curved","image":"name.jpg","roi":[x1,y1,x2,y2]}]; coordinates are normalized')
     p.add_argument('--qualitative-roi-size', type=float, default=.28,
                    help='GT-centred automatic square ROI side as a fraction of the shorter image side')
-    p.add_argument('--output-dir', type=Path, default=Path('paper_visualizations/9.11'))
+    p.add_argument('--scan-influence', action='store_true',
+                   help='Export exact scan-residual intensity and memory-delta maps; compare scanning methods on P3/P4')
+    p.add_argument('--scan-influence-roles', default='backbone_P3,backbone_P4',
+                   help='Comma-separated semantic CPSB roles used in cross-method scan-influence figures')
+    p.add_argument('--scan-influence-top-fraction', type=float, default=.10,
+                   help='Fraction of valid feature cells used for top-response GT hit rate')
+    p.add_argument('--scan-influence-gt-dilate', type=int, default=1,
+                   help='GT dilation radius in feature cells for scan-focus metrics and contour display')
+    p.add_argument('--output-dir', type=Path, default=Path('paper_visualizations/9.11'),
+                   help='Resumable output directory; matching complete image/model items are skipped')
     return p.parse_args()
 
 
@@ -169,21 +178,23 @@ def discover_layers(core, spec, imgsz, device):
     import torch
     from compare_model_features import resolve_layer_names
     modules = dict(core.named_modules())
+    # Observe strides in both auto and manual feature-layer modes. Mechanism
+    # modules still need these shapes to receive a truthful backbone/neck P-level.
+    shapes, handles = {}, []
+    for i, module in enumerate(core.model):
+        def hook(m, inputs, output, i=i):
+            if torch.is_tensor(output) and output.ndim == 4:
+                h,w = output.shape[-2:]
+                if h and w and imgsz % h == 0 and imgsz % w == 0 and imgsz//h == imgsz//w:
+                    shapes[i] = imgsz//h
+        handles.append(module.register_forward_hook(hook))
+    try:
+        with torch.inference_mode():
+            core(torch.zeros(1,3,imgsz,imgsz,device=device))
+    finally:
+        for handle in handles:
+            handle.remove()
     if spec['layers'].lower() == 'auto':
-        shapes, handles = {}, []
-        for i, module in enumerate(core.model):
-            def hook(m, inputs, output, i=i):
-                if torch.is_tensor(output) and output.ndim == 4:
-                    h,w = output.shape[-2:]
-                    if h and w and imgsz % h == 0 and imgsz % w == 0 and imgsz//h == imgsz//w:
-                        shapes[i] = imgsz//h
-            handles.append(module.register_forward_hook(hook))
-        try:
-            with torch.inference_mode():
-                core(torch.zeros(1,3,imgsz,imgsz,device=device))
-        finally:
-            for handle in handles:
-                handle.remove()
         features = select_stage_layers(core, shapes)
     else:
         features = {f'manual_{i}': n for i,n in enumerate(resolve_layer_names(core, spec['layers']))}
@@ -221,6 +232,11 @@ def semantic_role(module_name, plan):
     matches = [(role, parent) for role, parent in plan['features'].items()
                if module_name == parent or module_name.startswith(parent + '.')]
     return max(matches, key=lambda item: len(item[1]))[0] if matches else 'non_output_stage'
+
+
+def requested_feature_items(plan, qualitative_only):
+    """Do not consume ordinary feature hooks in influence-only fast mode."""
+    return [] if qualitative_only else list(plan['features'].items())
 
 
 def comparison_groups(specs):
@@ -314,6 +330,117 @@ def write_rows(path, rows):
         writer.writerows(rows)
 
 
+def read_rows(path):
+    """Read one of this script's CSV files while restoring scalar types."""
+    path = Path(path)
+    if not path.is_file():
+        return []
+
+    def scalar(value):
+        if value == '':
+            return ''
+        if value.lower() in {'true', 'false'}:
+            return value.lower() == 'true'
+        try:
+            return int(value) if re.fullmatch(r'[+-]?\d+', value) else float(value)
+        except ValueError:
+            return value
+
+    with path.open('r', encoding='utf-8-sig', newline='') as handle:
+        return [{key: scalar(value) for key, value in row.items()} for row in csv.DictReader(handle)]
+
+
+def completion_signature(args, spec, split, image_path, plan):
+    """Identify outputs that are safe to reuse without hashing a large checkpoint."""
+    image_stat = image_path.stat()
+    checkpoint = Path(spec['weights']).resolve()
+    checkpoint_stat = checkpoint.stat()
+    return {
+        'version': 1,
+        'split': split,
+        'image': str(image_path.resolve()),
+        'image_size': image_stat.st_size,
+        'image_mtime_ns': image_stat.st_mtime_ns,
+        'checkpoint': str(checkpoint),
+        'checkpoint_size': checkpoint_stat.st_size,
+        'checkpoint_mtime_ns': checkpoint_stat.st_mtime_ns,
+        'imgsz': args.imgsz,
+        'conf': args.conf,
+        'iou': args.iou,
+        'max_det': args.max_det,
+        'gt_dir': str(args.gt_dir.resolve()) if args.gt_dir else None,
+        'gt_invert': args.gt_invert,
+        'qualitative_only': args.qualitative_only,
+        'scan_influence': args.scan_influence,
+        'scan_influence_roles': args.scan_influence_roles,
+        'scan_influence_top_fraction': args.scan_influence_top_fraction,
+        'scan_influence_gt_dilate': args.scan_influence_gt_dilate,
+        'features': plan['features'],
+        'mechanisms': plan['mechanisms'],
+    }
+
+
+def load_completion(path, signature):
+    """Return cached per-image result rows only when its signature matches exactly."""
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload.get('rows') if payload.get('signature') == signature else None
+
+
+def legacy_manifest_matches(path, args, split):
+    """Allow one-time migration of complete outputs made before complete.json existed."""
+    if not path.is_file():
+        return False
+    try:
+        old = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if old.get('split') != split:
+        return False
+    old_args = old.get('arguments', {})
+    keys = ('source', 'gt_dir', 'gt_invert', 'imgsz', 'conf', 'iou', 'max_det', 'qualitative_only',
+            'scan_influence', 'scan_influence_roles', 'scan_influence_top_fraction',
+            'scan_influence_gt_dilate')
+    for key in keys:
+        current = getattr(args, key)
+        current = str(current) if isinstance(current, Path) else current
+        if old_args.get(key) != current:
+            return False
+    return True
+
+
+def legacy_completion(folder, spec, image_path, plan, states, args, previous):
+    """Recover rows from a complete pre-resume run; reject every partial artifact set."""
+    label, image = spec['label'], str(image_path)
+    required = [folder / 'input.png', folder / 'gt.png', folder / f'{label}_prediction.png',
+                folder / f'{label}_error.png']
+    rows = {name: [row for row in values if row.get('model') == label and row.get('image') == image]
+            for name, values in previous.items()}
+    if len(rows['metrics']) != 1:
+        return None
+    if not args.qualitative_only:
+        for role in plan['features']:
+            required.extend((folder / f'{label}_{role}.npy', folder / f'{label}_{role}.png'))
+        if len(rows['focus']) < len(plan['features']):
+            return None
+        for name in states:
+            stem = folder / f'{label}_{name.replace(".", "_")}_structure'
+            required.extend((stem.with_suffix('.png'), stem.with_suffix('.pdf')))
+        if len(rows['routing']) < len(states):
+            return None
+    if args.scan_influence:
+        for name in states:
+            stem = folder / f'{label}_{name.replace(".", "_")}_scan_influence'
+            required.extend((stem.with_suffix('.npz'), stem.with_suffix('.png'), stem.with_suffix('.pdf')))
+        if len(rows['influence']) < len(states):
+            return None
+    return rows if all(path.is_file() for path in required) else None
+
+
 SCAN_DISPLAY_NAMES = {
     'K01': 'Adaptive', 'K02': 'Raster', 'K03': 'Cross',
     'K04': 'Serpentine', 'K05': 'Diagonal', 'K06': 'Fixed straight',
@@ -387,6 +514,258 @@ def mask_error_image(pred, gt):
     result[~pred & gt] = (113, 116, 255)    # BGR coral/red
     result[pred & ~gt] = (237, 116, 176)    # BGR purple
     return result
+
+
+def scan_influence_diagnostics(state_name, state, memory, gt_square, valid_pixels, meta, image_shape,
+                               output, top_fraction=.10, gt_dilate=1):
+    """Save exact scan-branch residual maps and prediction-independent focus statistics."""
+    import cv2
+    import matplotlib.pyplot as plt
+
+    if state.last_route_update_rms is None or state.last_route_relative is None:
+        return []
+    absolute = state.last_route_update_rms[0].detach().cpu().numpy().astype(np.float32)
+    relative = state.last_route_relative[0].detach().cpu().numpy().astype(np.float32)
+    indices = state.last_path_indices[0].detach().cpu().numpy()
+    valid = state.last_path_mask[0].detach().cpu().numpy().astype(bool)
+    memory_delta, visited = scatter_path(
+        memory['decay'] - memory['decay_without_gates'], indices, valid, absolute.shape
+    )
+    height, width = absolute.shape
+    valid_small = cv2.resize(valid_pixels.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST).astype(bool)
+    gt_small = None
+    gt_band = np.zeros_like(valid_small)
+    if gt_square is not None:
+        gt_small = cv2.resize(gt_square.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST)
+        if gt_dilate:
+            size = 2 * gt_dilate + 1
+            gt_small = cv2.dilate(gt_small, np.ones((size, size), np.uint8))
+        gt_band = gt_small.astype(bool) & valid_small
+    background = valid_small & ~gt_band
+    crack_mean = float(relative[gt_band].mean()) if gt_band.any() else float('nan')
+    background_mean = float(relative[background].mean()) if background.any() else float('nan')
+    concentration = crack_mean / max(background_mean, 1e-12) if np.isfinite(crack_mean) else float('nan')
+    valid_indices = np.flatnonzero(valid_small)
+    top_hit = float('nan')
+    if len(valid_indices) and gt_square is not None:
+        count = max(1, int(np.ceil(len(valid_indices) * top_fraction)))
+        scores = relative.reshape(-1)[valid_indices]
+        chosen = valid_indices[np.argpartition(scores, -count)[-count:]]
+        top_hit = float(gt_band.reshape(-1)[chosen].mean())
+    np.savez_compressed(
+        output.with_suffix('.npz'), absolute=absolute, relative=relative, memory_delta=memory_delta,
+        visited=visited, gt_band=gt_band, valid_feature=valid_small,
+        letterbox_meta=np.asarray(meta, dtype=np.float32), canvas_hw=np.asarray(valid_pixels.shape, dtype=np.int32),
+        original_hw=np.asarray(image_shape, dtype=np.int32), module=np.asarray(state_name),
+    )
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)
+    panels = [(absolute, 'Absolute scan update RMS', 'magma', False),
+              (relative, 'Relative scan update / input', 'magma', False),
+              (memory_delta, 'Memory decay difference', 'coolwarm', True)]
+    for ax, (values, title, cmap, signed) in zip(axes, panels):
+        finite = values[np.isfinite(values)]
+        limit = float(np.percentile(np.abs(finite), 99)) if finite.size else 1.0
+        limit = max(limit, 1e-12)
+        im = ax.imshow(values, cmap=cmap, vmin=-limit if signed else 0, vmax=limit)
+        if gt_band.any():
+            ax.contour(gt_band.astype(float), levels=[.5], colors=['cyan'], linewidths=.7)
+        ax.set_title(title + '\nlocal scale (comparison uses shared scale)', fontsize=9)
+        ax.axis('off')
+        fig.colorbar(im, ax=ax, shrink=.65, extend='both' if signed else 'max')
+    fig.suptitle(state_name + '; cyan contour = dilated GT band', fontsize=10)
+    for suffix in ('png', 'pdf'):
+        fig.savefig(output.with_suffix('.' + suffix), dpi=220)
+    plt.close(fig)
+    return [{
+        'module': state_name, 'feature_height': height, 'feature_width': width,
+        'route_strength': float(state.effective_route().detach().cpu()),
+        'absolute_mean_valid': float(absolute[valid_small].mean()) if valid_small.any() else float('nan'),
+        'relative_mean_valid': float(relative[valid_small].mean()) if valid_small.any() else float('nan'),
+        'relative_mean_crack_band': crack_mean, 'relative_mean_background': background_mean,
+        'crack_concentration': concentration, 'top_response_gt_hit_rate': top_hit,
+        'memory_delta_mean_visited': float(memory_delta[visited].mean()) if visited.any() else float('nan'),
+        'npz': str(output.with_suffix('.npz')),
+    }]
+
+
+def restore_influence_map(values, payload, output_shape):
+    """Undo the square letterbox so a feature-space diagnostic aligns with the original image."""
+    import cv2
+    canvas_h, canvas_w = map(int, payload['canvas_hw'])
+    ratio, left, top, rw, rh = payload['letterbox_meta'].tolist()
+    square = cv2.resize(np.nan_to_num(values, nan=0.0), (canvas_w, canvas_h), interpolation=cv2.INTER_LINEAR)
+    cropped = square[int(top):int(top + rh), int(left):int(left + rw)]
+    return cv2.resize(cropped, output_shape[::-1], interpolation=cv2.INTER_LINEAR)
+
+
+def save_scan_influence_detail(output, original, heat, limit, cmap, signed, gt=None):
+    """Save text-free, full-resolution heatmap panels for direct visual inspection."""
+    import cv2
+    import matplotlib.pyplot as plt
+    from visualize_seg_results import write_image
+
+    output.mkdir(parents=True, exist_ok=True)
+    safe_heat = np.nan_to_num(heat, nan=0.0, posinf=limit, neginf=-limit)
+    if signed:
+        normalized = np.clip((safe_heat + limit) / (2.0 * limit), 0.0, 1.0)
+    else:
+        normalized = np.clip(safe_heat / limit, 0.0, 1.0)
+    color_rgb = (plt.get_cmap(cmap)(normalized)[..., :3] * 255.0).round().astype(np.uint8)
+    color_bgr = color_rgb[..., ::-1]
+    strength = np.clip(np.abs(safe_heat) / limit, 0.0, 1.0)
+    alpha = (0.78 * strength)[..., None]
+    overlay = np.clip(original.astype(np.float32) * (1.0 - alpha) + color_bgr.astype(np.float32) * alpha,
+                      0, 255).astype(np.uint8)
+
+    if not (output / 'heatmap.png').is_file():
+        write_image(output / 'heatmap.png', color_bgr)
+    if not any((output / name).is_file() for name in ('overlay.jpg', 'overlay.png')):
+        write_image(output / 'overlay.jpg', overlay)
+    if gt is not None:
+        overlay_gt = overlay.copy()
+        contours, _ = cv2.findContours(gt.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(overlay_gt, contours, -1, (255, 255, 0), max(1, round(max(original.shape[:2]) / 1000)))
+        if not any((output / name).is_file() for name in ('overlay_gt.jpg', 'overlay_gt.png')):
+            write_image(output / 'overlay_gt.jpg', overlay_gt)
+
+
+def scan_influence_detail_complete(output, require_gt):
+    """Accept both the original PNG layout and the compact resumable JPG layout."""
+    required = (output / 'heatmap.png').is_file()
+    required &= any((output / name).is_file() for name in ('overlay.jpg', 'overlay.png'))
+    if require_gt:
+        required &= any((output / name).is_file() for name in ('overlay_gt.jpg', 'overlay_gt.png'))
+    return bool(required)
+
+
+def render_scan_influence_comparison(args, split, images, specs, rows, group_out):
+    """Compare exact scan updates with one shared scale per image/semantic level."""
+    import cv2
+    import matplotlib.pyplot as plt
+    from visualize_seg_results import read_image, write_image
+
+    wanted_roles = [r.strip() for r in args.scan_influence_roles.split(',') if r.strip()]
+    lookup = {}
+    for row in rows:
+        if row['model'] in {s['label'] for s in specs} and row['semantic_role'] in wanted_roles:
+            key = (row['model'], row['image'], row['semantic_role'])
+            if key in lookup:
+                raise ValueError(f'Multiple scan states map to {key}; choose an unambiguous semantic role/module')
+            lookup[key] = row
+    output = group_out / 'scan_influence'
+    output.mkdir(exist_ok=True)
+    previous_scales = read_rows(output / 'shared_scales.csv')
+    scale_lookup = {(row.get('split'), row.get('image'), row.get('role'), row.get('field')): row
+                    for row in previous_scales}
+    for image_index, image_path in enumerate(images):
+        prefix = f'{image_index:04d}_{image_path.stem}'
+        print(f'  Scan-influence render {image_index + 1}/{len(images)}: {image_path.name}', flush=True)
+        first = args.output_dir.resolve() / specs[0]['label'] / split / prefix
+        original = read_image(first / 'input.png')
+        gt_file = first / 'gt_union.png'
+        gt = read_image(gt_file)[..., 0] > 0 if gt_file.is_file() else None
+        image_detail_root = output / 'details' / prefix
+        image_detail_root.mkdir(parents=True, exist_ok=True)
+        if not any((image_detail_root / name).is_file() for name in ('input.jpg', 'input.png')):
+            write_image(image_detail_root / 'input.jpg', original)
+        if gt is not None and not (image_detail_root / 'ground_truth.png').is_file():
+            write_image(image_detail_root / 'ground_truth.png', gt.astype(np.uint8) * 255)
+        display_scale = min(1.0, 1400.0 / max(original.shape[:2]))
+        if display_scale < 1.0:
+            display_size = (round(original.shape[1] * display_scale), round(original.shape[0] * display_scale))
+            display = cv2.resize(original, display_size, interpolation=cv2.INTER_AREA)
+            gt_display = cv2.resize(gt.astype(np.uint8), display_size, interpolation=cv2.INTER_NEAREST).astype(bool) if gt is not None else None
+        else:
+            display, gt_display = original, gt
+        for field, figure_name, cmap, signed, description in (
+            ('absolute', 'absolute_scan_update', 'magma', False, 'Absolute scan-induced feature update RMS'),
+            ('relative', 'relative_scan_update', 'magma', False, 'Relative scan-induced feature update'),
+            ('memory_delta', 'memory_decay_difference', 'coolwarm', True, 'Gated decay minus ungated decay'),
+        ):
+            available_roles = [role for role in wanted_roles if all((s['label'], str(image_path), role) in lookup for s in specs)]
+            if not available_roles:
+                continue
+            comparison_files = [output / f'{prefix}_{figure_name}.{suffix}' for suffix in ('png', 'pdf')]
+            detail_complete = all(
+                scan_influence_detail_complete(
+                    output / 'details' / prefix / role / figure_name / spec['label'], gt is not None
+                )
+                for role in available_roles for spec in specs
+            )
+            if detail_complete and all(path.is_file() for path in comparison_files):
+                for role in available_roles:
+                    scale_key = (split, str(image_path), role, field)
+                    if scale_key not in scale_lookup:
+                        restored = []
+                        for spec in specs:
+                            record = lookup[(spec['label'], str(image_path), role)]
+                            with np.load(record['npz']) as payload:
+                                restored.append(restore_influence_map(payload[field], payload, original.shape[:2]))
+                        finite = np.concatenate([value[np.isfinite(value)] for value in restored])
+                        limit = max(float(np.percentile(np.abs(finite), 99)) if finite.size else 1.0, 1e-12)
+                        scale_lookup[scale_key] = {
+                            'split': split, 'image': str(image_path), 'role': role, 'field': field,
+                            'shared_vmin': -limit if signed else 0.0, 'shared_vmax': limit, 'percentile': 99,
+                        }
+                print(f'    SKIP rendered: {figure_name}', flush=True)
+                continue
+            print(f'    Rendering: {figure_name}', flush=True)
+            fig, axes = plt.subplots(len(available_roles), len(specs) + 2,
+                                     figsize=(2.8 * (len(specs) + 2), 3.0 * len(available_roles)), squeeze=False,
+                                     constrained_layout=True)
+            for row_index, role in enumerate(available_roles):
+                restored_full = []
+                for spec in specs:
+                    record = lookup[(spec['label'], str(image_path), role)]
+                    with np.load(record['npz']) as payload:
+                        restored_full.append(restore_influence_map(payload[field], payload, original.shape[:2]))
+                finite = np.concatenate([v[np.isfinite(v)] for v in restored_full])
+                limit = float(np.percentile(np.abs(finite), 99)) if finite.size else 1.0
+                limit = max(limit, 1e-12)
+                scale_row = {'split': split, 'image': str(image_path), 'role': role, 'field': field,
+                             'shared_vmin': -limit if signed else 0.0, 'shared_vmax': limit,
+                             'percentile': 99}
+                scale_lookup[(split, str(image_path), role, field)] = scale_row
+                detail_root = output / 'details' / prefix / role / figure_name
+                detail_root.mkdir(parents=True, exist_ok=True)
+                for spec, heat_full in zip(specs, restored_full):
+                    save_scan_influence_detail(
+                        detail_root / spec['label'], original, heat_full, limit, cmap, signed, gt
+                    )
+                restored = [cv2.resize(v, display.shape[1::-1], interpolation=cv2.INTER_LINEAR)
+                            if v.shape != display.shape[:2] else v for v in restored_full]
+                axes[row_index, 0].imshow(display[..., ::-1])
+                axes[row_index, 0].set_title('Input' if row_index == 0 else '')
+                if gt_display is not None:
+                    gt_view = np.zeros_like(display)
+                    gt_view[gt_display] = 255
+                    axes[row_index, 1].imshow(gt_view[..., ::-1])
+                else:
+                    axes[row_index, 1].imshow(np.zeros_like(display))
+                axes[row_index, 1].set_title('Ground truth' if row_index == 0 else '')
+                last_im = None
+                for col_index, (spec, heat) in enumerate(zip(specs, restored), start=2):
+                    ax = axes[row_index, col_index]
+                    ax.imshow(display[..., ::-1])
+                    normalized = np.clip(np.abs(heat) / limit, 0, 1)
+                    alpha = .78 * normalized
+                    last_im = ax.imshow(heat, cmap=cmap, vmin=-limit if signed else 0, vmax=limit, alpha=alpha)
+                    if gt_display is not None and gt_display.any():
+                        contour = cv2.dilate(gt_display.astype(np.uint8), np.ones((5, 5), np.uint8))
+                        ax.contour(contour.astype(float), levels=[.5], colors=['cyan'], linewidths=.45)
+                    if row_index == 0:
+                        ax.set_title(scan_display_name(spec['label']), fontweight='bold')
+                for ax in axes[row_index]:
+                    ax.axis('off')
+                axes[row_index, 0].text(-.06, .5, role.replace('backbone_', ''), transform=axes[row_index, 0].transAxes,
+                                        rotation=90, va='center', ha='right', fontsize=11, fontweight='bold')
+                fig.colorbar(last_im, ax=axes[row_index, 2:], shrink=.7,
+                             extend='both' if signed else 'max', label=description + ' (shared scale)')
+            fig.suptitle(f'{description}: {image_path.name}', fontsize=14, fontweight='bold')
+            for suffix in ('png', 'pdf'):
+                fig.savefig(output / f'{prefix}_{figure_name}.{suffix}', dpi=300, bbox_inches='tight')
+            plt.close(fig)
+    write_rows(output / 'shared_scales.csv', list(scale_lookup.values()))
 
 
 def render_scanning_qualitative(args, split, images, cases, specs, metrics, group_out):
@@ -601,8 +980,12 @@ def run_split(args, specs, split):
     roi = validate_normalized_roi(args.roi.split(',')) if args.roi else None
     if not 0 < args.qualitative_roi_size <= 1:
         raise ValueError('--qualitative-roi-size must be in (0, 1]')
-    if args.qualitative_only and not args.qualitative_scanning:
-        raise ValueError('--qualitative-only requires --qualitative-scanning')
+    if not 0 < args.scan_influence_top_fraction <= 1 or args.scan_influence_gt_dilate < 0:
+        raise ValueError('--scan-influence-top-fraction must be in (0,1]; dilation must be nonnegative')
+    if args.scan_influence and not [r.strip() for r in args.scan_influence_roles.split(',') if r.strip()]:
+        raise ValueError('--scan-influence-roles must contain at least one semantic role')
+    if args.qualitative_only and not (args.qualitative_scanning or args.scan_influence):
+        raise ValueError('--qualitative-only requires --qualitative-scanning and/or --scan-influence')
     if args.qualitative_only and any(experiment_id(s['label']) not in SCAN_DISPLAY_NAMES for s in specs):
         raise ValueError('--qualitative-only accepts scanning ablations K01-K06 only')
     from visualize_seg_results import (GroundTruth, prepare_device_environment, resolve_source, read_image, write_image,
@@ -632,19 +1015,27 @@ def run_split(args, specs, split):
     out.mkdir(parents=True, exist_ok=True)
     manifest = {'arguments': {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
                 'split': split, 'models': specs, 'images': [{'path': str(p), 'sha256': fingerprint(p)} for p in images],
-                'precision': 'FP32 unfused', 'feature_normalization': 'per-image per-model 1st-99th percentile',
+                'precision': 'FP32 unfused',
+                'feature_normalization': 'feature panels: per-image/model; scan influence: shared pooled 99th percentile by image+role',
                 'metrics': 'class-agnostic per-image union metrics at fixed confidence; NOT instance AP',
                 'mask_postprocess': 'repository process_mask on square letterbox; nearest resize after unpadding',
                 'torch_version': torch.__version__, 'device': str(device)}
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
-    metrics, focus, routing = [], [], []
+    metrics, focus, routing, influence = [], [], [], []
     for spec in specs:
         model_out = args.output_dir.resolve() / spec['label'] / split
         model_out.mkdir(parents=True, exist_ok=True)
+        old_manifest_matches = legacy_manifest_matches(model_out / 'manifest.json', args, split)
+        previous = {
+            'metrics': read_rows(model_out / 'per_image_metrics.csv'),
+            'focus': read_rows(model_out / 'feature_focus.csv'),
+            'routing': read_rows(model_out / 'routing_memory.csv'),
+            'influence': read_rows(model_out / 'scan_influence.csv'),
+        }
         (model_out / 'manifest.json').write_text(json.dumps({**manifest, 'models': [spec]}, indent=2), encoding='utf-8')
         print(f"Loading {spec['label']}: {spec['weights']}", flush=True)
         core = load_core(spec, device)
-        if args.qualitative_only:
+        if args.qualitative_only and not args.scan_influence:
             plan = {'features': {}, 'mechanisms': [], 'mechanism_roles': {}, 'mechanism_status': 'skipped',
                     'selection': 'Skipped by --qualitative-only'}
             states = {}
@@ -653,12 +1044,35 @@ def run_split(args, specs, split):
         spec['resolved_plan'] = plan
         (model_out / 'layer_plan.json').write_text(json.dumps(plan, indent=2), encoding='utf-8')
         print(f"  Features: {plan['features']}; mechanisms: {plan['mechanisms'] or plan['mechanism_status']}", flush=True)
-        layers = list(dict.fromkeys(plan['features'].values()))
+        layers = [] if args.qualitative_only else list(dict.fromkeys(plan['features'].values()))
         modules = dict(core.named_modules())
+        for state in states.values():
+            state.export_visual_debug = bool(args.scan_influence)
         for image_index, image_path in enumerate(images):
             prefix = f'{image_index:04d}_{image_path.stem}'
             folder = model_out / prefix
             folder.mkdir(exist_ok=True)
+            signature = completion_signature(args, spec, split, image_path, plan)
+            cached = load_completion(folder / 'complete.json', signature)
+            if cached is not None and legacy_completion(folder, spec, image_path, plan, states, args, cached) is None:
+                cached = None
+            if cached is None and old_manifest_matches:
+                cached = legacy_completion(folder, spec, image_path, plan, states, args, previous)
+                if cached is not None:
+                    (folder / 'complete.json').write_text(
+                        json.dumps({'signature': signature, 'rows': cached}, indent=2,
+                                   default=lambda value: value.item() if isinstance(value, np.generic) else str(value)),
+                        encoding='utf-8',
+                    )
+            if cached is not None:
+                metrics.extend(cached.get('metrics', []))
+                focus.extend(cached.get('focus', []))
+                routing.extend(cached.get('routing', []))
+                influence.extend(cached.get('influence', []))
+                print(f"  SKIP complete: {spec['label']} / {split} {image_index+1}/{len(images)} "
+                      f"{image_path.name}", flush=True)
+                continue
+            row_starts = (len(metrics), len(focus), len(routing), len(influence))
             image = read_image(image_path)
             h, w = image.shape[:2]
             canvas, tensor, valid_pixels, meta = preprocess(image, args.imgsz, device, torch)
@@ -718,7 +1132,7 @@ def run_split(args, specs, split):
                             'gt_format': 'raster_mask' if gt_index is not None else 'yolo_polygon',
                             'gt_alignment': 'direct_no_rotation' if gt_index is not None else 'yolo_polygon',
                             **(union_metrics(pm, gt.masks) if known_gt else {})})
-            for role, name in plan['features'].items():
+            for role, name in requested_feature_items(plan, args.qualitative_only):
                 if name not in features:
                     raise ValueError(f'Layer does not output a spatial tensor: {name}')
                 heat = reduce_feature(features[name], 'l2')
@@ -730,19 +1144,42 @@ def run_split(args, specs, split):
                               **focus_statistics(heat, gt_square, valid_pixels)})
             for name, state in states.items():
                 if name in memory:
-                    rows = structure_figures(name, state, memory[name], canvas, gt_square, valid_pixels,
-                                             folder / (spec['label']+'_'+name.replace('.', '_')+'_structure'), args.max_paths_draw)
-                    routing.extend({'model': spec['label'], 'split': split, 'image': str(image_path),
-                                    'semantic_role': semantic_role(name, plan), **r} for r in rows)
+                    role = semantic_role(name, plan)
+                    if not args.qualitative_only:
+                        rows = structure_figures(name, state, memory[name], canvas, gt_square, valid_pixels,
+                                                 folder / (spec['label']+'_'+name.replace('.', '_')+'_structure'), args.max_paths_draw)
+                        routing.extend({'model': spec['label'], 'split': split, 'image': str(image_path),
+                                        'semantic_role': role, **r} for r in rows)
+                    if args.scan_influence:
+                        rows = scan_influence_diagnostics(
+                            name, state, memory[name], gt_square, valid_pixels, meta, (h, w),
+                            folder / (spec['label']+'_'+name.replace('.', '_')+'_scan_influence'),
+                            args.scan_influence_top_fraction, args.scan_influence_gt_dilate,
+                        )
+                        influence.extend({'model': spec['label'], 'split': split, 'image': str(image_path),
+                                          'semantic_role': role, **r} for r in rows)
+            completed_rows = {
+                'metrics': metrics[row_starts[0]:],
+                'focus': focus[row_starts[1]:],
+                'routing': routing[row_starts[2]:],
+                'influence': influence[row_starts[3]:],
+            }
+            (folder / 'complete.json').write_text(
+                json.dumps({'signature': signature, 'rows': completed_rows}, indent=2,
+                           default=lambda value: value.item() if isinstance(value, np.generic) else str(value)),
+                encoding='utf-8',
+            )
             print(f"  {spec['label']} / {split} {image_index+1}/{len(images)} {image_path.name}", flush=True)
             del pred, tensor, nms, masks, features, memory
         del core, modules, states
         gc.collect()
         if device.type == 'cuda':
             torch.cuda.empty_cache()
-        for name, rows in [('per_image_metrics', metrics), ('feature_focus', focus), ('routing_memory', routing)]:
+        for name, rows in [('per_image_metrics', metrics), ('feature_focus', focus), ('routing_memory', routing),
+                           ('scan_influence', influence)]:
             write_rows(model_out / (name+'.csv'), [r for r in rows if r['model'] == spec['label']])
-    for name, rows in [('per_image_metrics', metrics), ('feature_focus', focus), ('routing_memory', routing)]:
+    for name, rows in [('per_image_metrics', metrics), ('feature_focus', focus), ('routing_memory', routing),
+                       ('scan_influence', influence)]:
         write_rows(out / (name+'.csv'), rows)
     groups = comparison_groups(specs)
     (out/'layer_plans.json').write_text(json.dumps({s['label']:s['resolved_plan'] for s in specs}, indent=2), encoding='utf-8')
@@ -756,6 +1193,10 @@ def run_split(args, specs, split):
             if not all(r['gt_available'] for r in group_metrics):
                 raise ValueError('--qualitative-scanning requires GT for every selected image/model')
             render_scanning_qualitative(args, split, images, qualitative_cases, subset, group_metrics, group_out)
+        if args.scan_influence and group == 'scanning':
+            group_influence = [r for r in influence if r['model'] in {s['label'] for s in subset}]
+            write_rows(group_out / 'scan_influence.csv', group_influence)
+            render_scan_influence_comparison(args, split, images, subset, group_influence, group_out)
         if args.qualitative_only:
             continue
         roles = list(dict.fromkeys(k for s in subset for k in s['resolved_plan']['features']
@@ -798,12 +1239,13 @@ def main():
         raise ValueError('--gt-dir with a flat image directory uses one logical split; do not combine it with --split all')
     splits = resolve_splits(Path(args.source).resolve(), args.split)
     out = args.output_dir.resolve()
-    if out.exists() and any(out.iterdir()):
-        raise FileExistsError(f'Choose a new/empty output directory to avoid mixing runs: {out}')
+    resuming = out.exists() and any(out.iterdir())
     out.mkdir(parents=True, exist_ok=True)
     (out / 'run_plan.json').write_text(json.dumps({'models': specs, 'splits': splits,
                                                 'max_images_per_split': args.max_images}, indent=2), encoding='utf-8')
     print(f'{len(specs)} models; splits: {", ".join(splits)}; max images per split: {args.max_images or "ALL"}', flush=True)
+    if resuming:
+        print(f'Resume mode: reuse matching complete.json entries in {out}; incomplete/mismatched items rerun.', flush=True)
     for split in splits:
         run_split(args, specs, split)
 

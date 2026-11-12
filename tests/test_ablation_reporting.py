@@ -1,4 +1,5 @@
 """Run directly: python tests/test_ablation_reporting.py (no Ultralytics import)."""
+import json
 import sys
 import tempfile
 import unittest
@@ -12,9 +13,44 @@ from visualize_ablation_paper import scatter_path, memory_diagnostics, figure_gr
 from visualize_ablation_paper import build_gt_index, load_external_gt
 from visualize_ablation_paper import select_stage_layers, comparison_groups
 from visualize_ablation_paper import automatic_gt_roi, mask_error_image, resolve_qualitative_cases, scan_display_name
+from visualize_ablation_paper import (completion_signature, load_completion, requested_feature_items,
+                                      scan_influence_detail_complete)
 
 
 class ReportingTests(unittest.TestCase):
+    def test_scan_detail_resume_accepts_png_and_jpg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root/'heatmap.png').write_bytes(b'x')
+            (root/'overlay.jpg').write_bytes(b'x')
+            self.assertTrue(scan_influence_detail_complete(root, False))
+            self.assertFalse(scan_influence_detail_complete(root, True))
+            (root/'overlay_gt.png').write_bytes(b'x')
+            self.assertTrue(scan_influence_detail_complete(root, True))
+
+    def test_matching_completion_marker_resumes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image, weights = root/'image.jpg', root/'best.pt'
+            image.write_bytes(b'image')
+            weights.write_bytes(b'weights')
+            args = SimpleNamespace(imgsz=640, conf=.25, iou=.7, max_det=300, gt_dir=None, gt_invert=False,
+                                   qualitative_only=True, scan_influence=True,
+                                   scan_influence_roles='backbone_P3,backbone_P4',
+                                   scan_influence_top_fraction=.1, scan_influence_gt_dilate=1)
+            plan = {'features': {'backbone_P3': 'model.4'}, 'mechanisms': ['model.4.m.0.path']}
+            signature = completion_signature(args, {'weights': str(weights)}, 'external', image, plan)
+            marker = root/'complete.json'
+            marker.write_text(json.dumps({'signature': signature, 'rows': {'metrics': [{'pixel_iou': .5}]}}))
+            self.assertEqual(load_completion(marker, signature)['metrics'][0]['pixel_iou'], .5)
+            changed = dict(signature, conf=.5)
+            self.assertIsNone(load_completion(marker, changed))
+
+    def test_influence_only_skips_unregistered_feature_hooks(self):
+        plan = {'features': {'backbone_P2': 'model.2', 'backbone_P3': 'model.4'}}
+        self.assertEqual(requested_feature_items(plan, True), [])
+        self.assertEqual(requested_feature_items(plan, False), list(plan['features'].items()))
+
     def test_qualitative_cases_roi_and_error_colours(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

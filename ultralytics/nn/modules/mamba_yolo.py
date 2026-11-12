@@ -1404,6 +1404,11 @@ class SparseCrackPathState(nn.Module):
         self.last_connectivity = None
         self.last_path_indices = None
         self.last_path_mask = None
+        # Optional inference-only diagnostics. These are spatial summaries of
+        # the exact residual added by the scan branch, not reconstructed paths.
+        self.export_visual_debug = False
+        self.last_route_update_rms = None
+        self.last_route_relative = None
         self.visual_guidance = None
         self.visual_orientation = None
         self.visual_connectivity = None
@@ -1414,8 +1419,9 @@ class SparseCrackPathState(nn.Module):
         state = self.__dict__.copy()
         for name in (
             "last_guidance", "last_orientation", "last_connectivity", "last_path_indices",
-            "last_path_mask", "visual_guidance", "visual_orientation", "visual_connectivity",
-            "_ordered_cache_key", "_ordered_cache",
+            "last_path_mask", "last_route_update_rms", "last_route_relative",
+            "visual_guidance", "visual_orientation", "visual_connectivity",
+            "export_visual_debug", "_ordered_cache_key", "_ordered_cache",
         ):
             state.pop(name, None)
         return state
@@ -1625,6 +1631,8 @@ class SparseCrackPathState(nn.Module):
         if not getattr(self, "route_enabled", True):
             self.last_path_indices = None
             self.last_path_mask = None
+            self.last_route_update_rms = None
+            self.last_route_relative = None
             return x
 
         # Top-k, argmax direction selection and thresholded continuation form a
@@ -1653,7 +1661,16 @@ class SparseCrackPathState(nn.Module):
         sparse_mask = (counts > 0).view(batch, 1, height, width).to(sparse_delta.dtype)
         self.last_path_indices = indices.detach()
         self.last_path_mask = valid_mask.view(batch, path_count, path_length).detach()
-        return x + self.effective_route() * sparse_mask * self.state_out(sparse_delta)
+        route_update = self.effective_route() * sparse_mask * self.state_out(sparse_delta)
+        if getattr(self, "export_visual_debug", False):
+            update_rms = route_update.detach().float().square().mean(dim=1).sqrt()
+            input_rms = x.detach().float().square().mean(dim=1).sqrt()
+            self.last_route_update_rms = update_rms
+            self.last_route_relative = update_rms / input_rms.clamp_min(1e-6)
+        else:
+            self.last_route_update_rms = None
+            self.last_route_relative = None
+        return x + route_update
 
 
 class _AdaptiveCrackPathUnit(nn.Module):

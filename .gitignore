@@ -9,6 +9,13 @@ paper_visualizations/
 visualization_results/
 feature_visualization/
 feature_comparison/
+/runs/
+/results/
+/train_results/
+/prediction_results/
+/benchmark_results/
+/datasets/
+/weights/
 tmp/
 
 # Local datasets and generated caches

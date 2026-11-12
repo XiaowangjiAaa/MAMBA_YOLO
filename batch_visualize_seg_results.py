@@ -7,6 +7,9 @@ import visualize_seg_results as visualization
 
 # 用户配置区：权重可为 .pt 或 .pth；原始 state_dict 的 .pth 需填写对应 model_yaml。
 MODELS = {
+    "mambayolo": {
+            "weights": r"output_dir\mambayolo\mambayolo_crackseg\weights\best_map50.pt",
+        },
     "ours": {
         "weights": r"output_dir/crack-seg-9.3/H01_crack-seg_seed0/weights/best_map50.pt",
     },
@@ -15,11 +18,16 @@ MODELS = {
     },
 }
 DATASETS = {
-    "SUT-Crack": {
-        "image": r"H:\dataset\Public_crack_dataset\SUT-Crack\VOC2012/JPEGImages",
-        "GT": r"H:\dataset\Public_crack_dataset\SUT-Crack\VOC2012/cnnlabels",
-    },
-    "single-crack-crack": r"F:\UTS_work_code\YOLO_Yingjie\YOLO_dataset_process\single-crack-crackseg/data.yaml",
+
+    "SUT-Crack-4": {
+            "image": r"C:\Users\xiaow\Desktop\CUT-CRACK\image",
+            "GT": r"C:\Users\xiaow\Desktop\CUT-CRACK\gt",
+        },
+
+
+
+
+
 }
 OUTPUT_DIR = "predictresults/batch"
 ERROR_COLORS = {"FP": "#D98282", "FN": "#D8AD63"}  # 误检：柔和珊瑚色；漏检：暖金色。
@@ -28,17 +36,10 @@ SKIP_EXISTING = True  # 重画完成后可改为 True；检查全部配色和白
 BATCH_SIZE = 1
 SPLIT = "all"  # YAML 可选 train、val、test、all。
 COLOR_VARIANTS = {
-    "lavender": {0: "#DEC6E7"},
+    "cyan": {0: "#02F2FC"},
+    "orange": {0: "#E97132"},
+    "lime_green": {0: "#55D944"},
     "teal": {0: "#08B5AD"},
-    "blue_gray": {0: "#D1DFEA"},
-    "mint": {0: "#D3E8DD"},
-    "pink": {0: "#FFE2E5"},
-    "periwinkle": {0: "#E6E5FA"},
-    "sky_blue": {0: "#C9E8FD"},
-    "seafoam": {0: "#73BDB5"},
-    "pale_lavender": {0: "#EEEBFE"},
-    "powder_blue": {0: "#C1E2F9"},
-    "lilac": {0: "#E0CFF9"},
 }
 MASK_ALPHA = 0.5  # 掩膜不透明度：0 完全透明，1 完全不透明。
 DEVICE = "0"  # 无 GPU 时改为 "cpu"。
